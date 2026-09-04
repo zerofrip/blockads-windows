@@ -49,6 +49,13 @@ func packageForUidCached(r AppUidResolver, uid int) string {
 	if cached, ok := uidPackageCache.Load(uid); ok {
 		return cached.(string)
 	}
+	// Serialize first-time resolves so concurrent logConnection goroutines
+	// (async reportConnection) do not stampede getPackagesForUid for one UID.
+	uidPackageResolveMu.Lock()
+	defer uidPackageResolveMu.Unlock()
+	if cached, ok := uidPackageCache.Load(uid); ok {
+		return cached.(string)
+	}
 	pkg := r.PackageForUid(uid)
 	if pkg != "" {
 		uidPackageCache.Store(uid, pkg)
@@ -67,6 +74,9 @@ var connLogSeen sync.Map // key string -> struct{}
 // of one per flow. UIDs are stable for an app's install lifetime, and the
 // cache dies with the engine, so staleness isn't a concern.
 var uidPackageCache sync.Map // int -> string
+
+// uidPackageResolveMu prevents concurrent cache-miss stampedes for the same UID.
+var uidPackageResolveMu sync.Mutex
 
 // logConnection reports a connection to the DNS-log callback so it shows in
 // the app's log screen (marked blockedBy="connection"). Deduped per
@@ -132,3 +142,4 @@ func (e *Engine) reportConnection(cb LogCallback, flow flowID, protocol int) {
 		false, 0, 0, app, dest, "connection",
 	)
 }
+
