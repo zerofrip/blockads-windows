@@ -6,10 +6,10 @@
 | Portable mmap | unix mmap | windows MapView | TESTED | Phase 1 done |
 | Trie/Bloom load | Yes | Same files | TESTED | mapped_file_test |
 | Custom rules (Go) | Kotlin DomainChecker | Pure Go | IMPLEMENTED | Android still uses Kotlin |
-| StartStandalone DNS | Root Proxy | Phase 2 core | NOT_STARTED | Reuse as-is |
-| DnsConfigurator | VpnService DNS | Native IP Helper | NOT_STARTED | Compare-and-restore |
-| Adapter policy | UID/app bypass | Eligibility policy | NOT_STARTED | DNS_ADAPTER_POLICY |
-| blockads-cli | N/A | CLI | NOT_STARTED | Phase 2 |
+| StartStandalone DNS | Root Proxy | Phase 2 core | IMPLEMENTED | Controller wraps StartStandalone |
+| DnsConfigurator | VpnService DNS | Native IP Helper | IMPLEMENTED | Get/SetInterfaceDnsSettings; runtime UNVERIFIED |
+| Adapter policy | UID/app bypass | Eligibility policy | IMPLEMENTED | Ethernet/Wi-Fi conservative |
+| blockads-cli | N/A | CLI | IMPLEMENTED | enable/disable/status/recover/test-dns |
 | Windows Service | Foreground svc | SCM service | NOT_STARTED | Phase 3 |
 | Desktop UI | Compose | WPF | NOT_STARTED | Phase 4 |
 | Process identity | UID/package | PID/path | NOT_STARTED | Phase 5 |

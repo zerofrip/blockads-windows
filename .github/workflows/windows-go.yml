@@ -45,3 +45,28 @@ jobs:
         run: |
           GOOS=windows GOARCH=amd64 go build -o ../build/blockads-tunnel-windows-amd64.exe .
           GOOS=windows GOARCH=amd64 go test -c -o ../build/tunnel-windows.test.exe .
+
+  windows-module:
+    name: Windows module on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.5'
+          cache: true
+          cache-dependency-path: |
+            tunnel/go.sum
+            windows/go.sum
+      - name: Go test windows module
+        run: go test ./... -count=1
+      - name: Build blockads-cli
+        run: go build -o ../build/blockads-cli${{ matrix.os == 'windows-latest' && '.exe' || '' }} ./cmd/blockads-cli
+

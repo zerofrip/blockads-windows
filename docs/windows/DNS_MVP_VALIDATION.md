@@ -36,7 +36,9 @@ Environment under test: (OS build, adapters, IPv6 yes/no)
 
 ## Network change mechanism selected
 
-(To be filled: e.g. `NotifyIpInterfaceChange` callback vs re-eval timer.)
+Phase 2 MVP: recovery/ownership is per adapter GUID; enable/disable and `recover` re-enumerate adapters via `GetAdaptersAddresses`.
+
+Planned (Phase 3+): `NotifyIpInterfaceChange` (or equivalent) to trigger controlled re-evaluation without aggressive polling. Controller surface already keys state by stable GUID/LUID so appear/disappear does not require redesign.
 
 ## Known insufficient configurations
 
