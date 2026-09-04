@@ -383,6 +383,18 @@ func (c *Controller) loadFiltersLocked(ctx context.Context, engine *tunnel.Engin
 }
 
 func (c *Controller) Disable(ctx context.Context) error {
+	return c.stopRuntime(ctx, true, "disable_restore")
+}
+
+// ShutdownForServiceStop restores DNS and stops the listener without clearing
+// desired protection. SCM Stop/Shutdown must not persist enabled=false so that
+// Startup can re-apply filtering after reboot or service restart.
+func (c *Controller) ShutdownForServiceStop(ctx context.Context) error {
+	return c.stopRuntime(ctx, false, "service_stop_restore")
+}
+
+func (c *Controller) stopRuntime(ctx context.Context, clearDesired bool, recoveryAction string) error {
+	_ = ctx
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.acceptMut = false
@@ -393,7 +405,7 @@ func (c *Controller) Disable(ctx context.Context) error {
 	results := c.restoreOwnedLocalhostLocked()
 	for _, r := range results {
 		if r.Decision == dnsconfig.RestoreApplied {
-			c.lastRecoveryAction = "disable_restore"
+			c.lastRecoveryAction = recoveryAction
 		}
 	}
 	c.scanUnprovenLocalhostLocked()
@@ -404,7 +416,9 @@ func (c *Controller) Disable(ctx context.Context) error {
 	}
 	c.session = ""
 	c.listenerHealthy = false
-	_ = c.persistEnabledLocked(false)
+	if clearDesired {
+		_ = c.persistEnabledLocked(false)
+	}
 	st, _ := c.cfgStore.Load()
 	if st != nil && (len(st.Adapters) > 0 || len(st.SuspectedUnprovenLocalhost) > 0) {
 		c.state = dnsconfig.StateRecoveryRequired
@@ -690,5 +704,6 @@ func healthCheckLocalDNS(ctx context.Context, port int) error {
 	}
 	return nil
 }
+
 
 

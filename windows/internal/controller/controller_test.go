@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +201,64 @@ func TestStartupAppliesDesiredEnable(t *testing.T) {
 	_ = c.Disable(ctx)
 }
 
+func TestShutdownForServiceStopPreservesDesiredEnabled(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{FFFFFFFF-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.40"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1857)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if err := c.Enable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ShutdownForServiceStop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := mem.Snapshot(key)
+	if !dnsconfig.EqualServers(cur.IPv4Servers, orig.IPv4Servers) {
+		t.Fatalf("dns not restored on service stop: %v", cur.IPv4Servers)
+	}
+	raw, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsEnabledTrue(string(raw)) {
+		t.Fatalf("desired enabled cleared by service stop: %s", raw)
+	}
+	if c.Status().Engine.FilteringEnabled {
+		t.Fatal("runtime filtering should be stopped")
+	}
+	c.Close()
+	// Startup must re-apply from preserved desired state.
+	c2, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if err := c2.Startup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !c2.Status().Engine.FilteringEnabled {
+		t.Fatal("startup should re-enable after service-stop shutdown")
+	}
+	_ = c2.Disable(ctx)
+}
+
+func containsEnabledTrue(s string) bool {
+	return strings.Contains(s, `"enabled": true`) || strings.Contains(s, `"enabled":true`)
+}
+
 func TestStartupSkipsEnableWhenDesiredDisabled(t *testing.T) {
 	key := dnsconfig.AdapterKey{GUID: "{EEEEEEEE-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
 	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
@@ -224,4 +283,5 @@ func TestStartupSkipsEnableWhenDesiredDisabled(t *testing.T) {
 		t.Fatal("desired disabled must not enable filtering")
 	}
 }
+
 

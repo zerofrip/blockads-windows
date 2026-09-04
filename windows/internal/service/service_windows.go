@@ -54,7 +54,7 @@ func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, cha
 		select {
 		case err := <-errCh:
 			cancel()
-			_ = ctrl.Disable(context.Background())
+			_ = ctrl.ShutdownForServiceStop(context.Background())
 			if err != nil {
 				return true, 1
 			}
@@ -66,7 +66,8 @@ func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, cha
 			case svc.Stop, svc.Shutdown:
 				changes <- svc.Status{State: svc.StopPending}
 				cancel()
-				_ = ctrl.Disable(context.Background())
+				// Preserve desired protection across SCM stop/reboot.
+				_ = ctrl.ShutdownForServiceStop(context.Background())
 				time.Sleep(100 * time.Millisecond)
 				changes <- svc.Status{State: svc.Stopped}
 				return false, 0
@@ -92,4 +93,5 @@ func InstallHints() string {
 	exe, _ := filepath.Abs("BlockAdsService.exe")
 	return "Use: blockads-service install|uninstall|start|stop|status\nDefault exe: " + exe
 }
+
 
