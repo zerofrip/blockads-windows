@@ -30,6 +30,12 @@ func TestIsEligibleConservative(t *testing.T) {
 	if dnsconfig.IsEligible(wsl) {
 		t.Fatal("WSL must not be eligible")
 	}
+	guest := eth
+	guest.FriendlyName = "イーサネット"
+	guest.Description = "Microsoft Hyper-V Network Adapter"
+	if !dnsconfig.IsEligible(guest) {
+		t.Fatal("Hyper-V guest synthetic NIC must be eligible")
+	}
 	down := eth
 	down.OperStatus = dnsconfig.OperStatusDown
 	if dnsconfig.IsEligible(down) {
@@ -155,4 +161,5 @@ func TestStateStoreRoundTrip(t *testing.T) {
 		t.Fatalf("load failed: %v %+v", err, loaded)
 	}
 }
+
 

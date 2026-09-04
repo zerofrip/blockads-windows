@@ -26,11 +26,22 @@ const (
 )
 
 // denylistKeywords — case-insensitive match against description/friendly name.
+// Note: "Microsoft Hyper-V Network Adapter" is the synthetic NIC *inside* a
+// Hyper-V guest and MUST remain eligible (see isHyperVGuestNic). Host-side
+// vEthernet / "Hyper-V Virtual Ethernet Adapter" stay denylisted.
 var denylistKeywords = []string{
-	"wintun", "wireguard", "hyper-v", "vethernet", "wsl", "docker",
+	"wintun", "wireguard", "vethernet", "wsl", "docker",
 	"virtualbox", "vmware", "tap-windows", "tap-win", "openvpn", "nordlynx",
 	"zerotier", "tailscale", "cloudflare warp", "warp", "blockads",
-	"virtual", "vpn",
+	"virtual ethernet", "default switch",
+	"vpn",
+}
+
+// isHyperVGuestNic reports the in-guest Hyper-V synthetic Ethernet adapter
+// (netvsc), which is the real primary NIC for disposable Hyper-V VMs.
+func isHyperVGuestNic(blob string) bool {
+	return strings.Contains(blob, "microsoft hyper-v network adapter") &&
+		!strings.Contains(blob, "virtual ethernet")
 }
 
 // IsEligible reports whether an adapter may receive BlockAds DNS (conservative).
@@ -50,8 +61,17 @@ func IsEligible(a NetworkAdapter) bool {
 		return false
 	}
 	blob := strings.ToLower(a.FriendlyName + " " + a.Description)
-	for _, kw := range denylistKeywords {
-		if strings.Contains(blob, kw) {
+	if !isHyperVGuestNic(blob) {
+		for _, kw := range denylistKeywords {
+			if strings.Contains(blob, kw) {
+				return false
+			}
+		}
+		// Host Hyper-V / legacy keyword coverage without excluding guest NIC.
+		if strings.Contains(blob, "hyper-v") {
+			return false
+		}
+		if strings.Contains(blob, "virtual") {
 			return false
 		}
 	}
@@ -74,3 +94,4 @@ func FilterEligible(adapters []NetworkAdapter) []NetworkAdapter {
 	}
 	return out
 }
+
