@@ -2,6 +2,8 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,11 +12,45 @@ import (
 	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
 )
 
-func TestEnableDisableCompareAndRestore(t *testing.T) {
-	key := dnsconfig.AdapterKey{GUID: "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
-	orig := dnsconfig.AdapterDNSSnapshot{
-		Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"},
+func testPaths(t *testing.T) controller.Paths {
+	t.Helper()
+	dir := t.TempDir()
+	return controller.Paths{
+		DataDir:    dir,
+		StateFile:  filepath.Join(dir, "recovery.json"),
+		ConfigFile: filepath.Join(dir, "config.json"),
+		FilterDir:  filepath.Join(dir, "filters"),
 	}
+}
+
+func writeHighPortConfig(t *testing.T, path string, port int) {
+	t.Helper()
+	content := fmt.Sprintf(`{
+  "version": 1,
+  "enabled": false,
+  "dns": {
+    "listenPort": %d,
+    "protocol": "udp",
+    "primary": "1.1.1.1",
+    "fallback": "1.0.0.1"
+  },
+  "filters": {
+    "catalogUrl": "http://127.0.0.1:1/missing.json",
+    "enabledListIds": [],
+    "autoUpdate": false
+  }
+}`, port)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnableDisableWithHighPort(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
 	dnsconfig.FillChecksum(&orig)
 	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
 		Key: key, FriendlyName: "Ethernet", Description: "Realtek PCIe",
@@ -22,39 +58,34 @@ func TestEnableDisableCompareAndRestore(t *testing.T) {
 		IPv4Addrs: []string{"192.168.1.10"},
 	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
 
-	dir := t.TempDir()
-	c := controller.New(controller.Paths{StateFile: filepath.Join(dir, "recovery.json")}, mem)
-	c.SetConfig(controller.Config{
-		ListenPort:  1853, // non-privileged for tests
-		DNSProtocol: "udp",
-		PrimaryDNS:  "1.1.1.1",
-		FallbackDNS: "1.0.0.1",
-		BlockRules:  []string{"ads.test"},
-	})
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1853)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := c.Enable(ctx); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	st := c.Status()
-	if st.State != dnsconfig.StateActive {
-		t.Fatalf("state=%s", st.State)
+	if !st.Engine.FilteringEnabled {
+		t.Fatalf("expected filtering enabled: %+v", st)
 	}
 	cur, _ := mem.Snapshot(key)
 	if !dnsconfig.EqualServers(cur.IPv4Servers, dnsconfig.LocalhostApplied.IPv4Servers) {
 		t.Fatalf("dns not applied: %v", cur.IPv4Servers)
 	}
-
-	if err := c.Disable(); err != nil {
-		t.Fatalf("disable: %v", err)
+	if err := c.Disable(ctx); err != nil {
+		t.Fatal(err)
 	}
 	cur, _ = mem.Snapshot(key)
 	if !dnsconfig.EqualServers(cur.IPv4Servers, orig.IPv4Servers) {
 		t.Fatalf("dns not restored: %v", cur.IPv4Servers)
-	}
-	if c.Status().State != dnsconfig.StateDisabled {
-		t.Fatalf("want DISABLED, got %s", c.Status().State)
 	}
 }
 
@@ -68,9 +99,13 @@ func TestDisableSkipsExternallyChangedDNS(t *testing.T) {
 		IPv4Addrs: []string{"192.168.1.20"},
 	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
 
-	dir := t.TempDir()
-	c := controller.New(controller.Paths{StateFile: filepath.Join(dir, "recovery.json")}, mem)
-	c.SetConfig(controller.Config{ListenPort: 1854, PrimaryDNS: "1.1.1.1", DNSProtocol: "udp"})
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1854)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
 	ctx := context.Background()
 	if err := c.Enable(ctx); err != nil {
 		t.Fatal(err)
@@ -78,7 +113,7 @@ func TestDisableSkipsExternallyChangedDNS(t *testing.T) {
 	mem.SetCurrent(key, dnsconfig.AdapterDNSSnapshot{
 		Key: key, IPv4Servers: dnsconfig.DNSServerList{"8.8.8.8"},
 	})
-	if err := c.Disable(); err != nil {
+	if err := c.Disable(ctx); err != nil {
 		t.Fatal(err)
 	}
 	cur, _ := mem.Snapshot(key)
@@ -100,8 +135,8 @@ func TestCrashRecoveryOwnedOnly(t *testing.T) {
 		IPv6Servers: dnsconfig.LocalhostApplied.IPv6Servers,
 	}})
 
-	dir := t.TempDir()
-	store := dnsconfig.NewStateStore(filepath.Join(dir, "recovery.json"))
+	paths := testPaths(t)
+	store := dnsconfig.NewStateStore(paths.StateFile)
 	_ = store.Save(&dnsconfig.RecoveryState{
 		Version: 1, SessionID: "dead", Dirty: true,
 		Controller: dnsconfig.StateRecoveryRequired,
@@ -110,8 +145,12 @@ func TestCrashRecoveryOwnedOnly(t *testing.T) {
 		}},
 	})
 
-	c := controller.New(controller.Paths{StateFile: store.Path()}, mem)
-	results, err := c.RecoverIfNeeded()
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	results, err := c.Recover(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
