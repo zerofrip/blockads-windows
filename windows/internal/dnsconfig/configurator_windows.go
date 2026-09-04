@@ -86,19 +86,18 @@ func (w *winConfigurator) ListAdapters() ([]NetworkAdapter, error) {
 func parseAdapters(head *windows.IpAdapterAddresses) []NetworkAdapter {
 	var out []NetworkAdapter
 	for a := head; a != nil; a = a.Next {
+		// AdapterName is the permanent NDIS interface GUID string required by
+		// Get/SetInterfaceDnsSettings. NetworkGuid is the *network profile*
+		// GUID and is often identical across adapters — do not use it here.
 		na := NetworkAdapter{
 			Key: AdapterKey{
-				GUID: formatGUID(a.NetworkGuid),
+				GUID: normalizeGUID(windows.BytePtrToString(a.AdapterName)),
 				LUID: a.Luid,
 			},
 			FriendlyName: windows.UTF16PtrToString(a.FriendlyName),
 			Description:  windows.UTF16PtrToString(a.Description),
 			IfType:       a.IfType,
 			OperStatus:   a.OperStatus,
-		}
-		if na.Key.GUID == "{00000000-0000-0000-0000-000000000000}" {
-			// Fallback to AdapterName (ASCII GUID string)
-			na.Key.GUID = normalizeGUID(windows.BytePtrToString(a.AdapterName))
 		}
 		for u := a.FirstUnicastAddress; u != nil; u = u.Next {
 			ip := sockaddrToIP(u.Address.Sockaddr)
@@ -114,13 +113,6 @@ func parseAdapters(head *windows.IpAdapterAddresses) []NetworkAdapter {
 		out = append(out, na)
 	}
 	return out
-}
-
-func formatGUID(g windows.GUID) string {
-	return fmt.Sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-		g.Data1, g.Data2, g.Data3,
-		g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
-		g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7])
 }
 
 func normalizeGUID(s string) string {
@@ -228,13 +220,11 @@ func (w *winConfigurator) setNameServers(guid windows.GUID, servers DNSServerLis
 		settings.Flags |= dnsSettingIPv6
 	}
 	joined := joinServers(servers)
-	if joined != "" {
-		p, err := windows.UTF16PtrFromString(joined)
-		if err != nil {
-			return err
-		}
-		settings.NameServer = p
+	p, err := windows.UTF16PtrFromString(joined)
+	if err != nil {
+		return err
 	}
+	settings.NameServer = p
 	r1, _, _ := procSetInterfaceDnsSettings.Call(
 		uintptr(unsafe.Pointer(&guid)),
 		uintptr(unsafe.Pointer(&settings)),
@@ -286,3 +276,4 @@ func (w *winConfigurator) Status() (string, error) {
 	elig := FilterEligible(ads)
 	return fmt.Sprintf("platform=windows adapters=%d eligible=%d api=Get/SetInterfaceDnsSettings minBuild=19041", len(ads), len(elig)), nil
 }
+
