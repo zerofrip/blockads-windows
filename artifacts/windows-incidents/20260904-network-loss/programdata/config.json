@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "enabled": false,
+  "dns": {
+    "listenPort": 53,
+    "protocol": "doh",
+    "primary": "1.1.1.1",
+    "fallback": "203.0.113.50",
+    "dohUrl": "https://cloudflare-dns.com/dns-query"
+  },
+  "filters": {
+    "catalogUrl": "https://raw.githubusercontent.com/pass-with-high-score/blockads-default-filter/refs/heads/main/output/filter_lists.json",
+    "enabledListIds": [],
+    "autoUpdate": true
+  }
+}

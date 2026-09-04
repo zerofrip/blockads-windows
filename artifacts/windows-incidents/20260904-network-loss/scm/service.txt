@@ -1,0 +1,35 @@
+
+
+Name                : BlockAdsService
+RequiredServices    : {}
+CanPauseAndContinue : False
+CanShutdown         : False
+CanStop             : False
+DisplayName         : BlockAds DNS Filter
+DependentServices   : {}
+MachineName         : .
+ServiceName         : BlockAdsService
+ServicesDependedOn  : {}
+ServiceHandle       : 
+Status              : Stopped
+ServiceType         : Win32OwnProcess
+StartType           : Automatic
+Site                : 
+Container           : 
+
+
+
+
+
+
+Name      : BlockAdsService
+State     : Stopped
+StartMode : Auto
+StartName : LocalSystem
+PathName  : C:\Users\zerof\blockads-windows-val\artifacts-tmp\blockads-service.exe
+ExitCode  : 0
+ProcessId : 0
+
+
+
+

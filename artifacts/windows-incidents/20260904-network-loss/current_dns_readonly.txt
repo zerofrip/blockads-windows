@@ -1,0 +1,10 @@
+ローカル エリア接続|23|fec0:0:0:ffff::1,fec0:0:0:ffff::2,fec0:0:0:ffff::3
+イーサネット|2|192.168.1.1
+イーサネット|23|240b:11:c3c1:b200:225:36ff:fe90:de2
+Wi-Fi|2|192.168.1.1
+ローカル エリア接続* 1|23|fec0:0:0:ffff::1,fec0:0:0:ffff::2,fec0:0:0:ffff::3
+ローカル エリア接続* 2|2|192.168.49.1
+Bluetooth ネットワーク接続|23|fec0:0:0:ffff::1,fec0:0:0:ffff::2,fec0:0:0:ffff::3
+Loopback Pseudo-Interface 1|23|fec0:0:0:ffff::1,fec0:0:0:ffff::2,fec0:0:0:ffff::3
+vEthernet (Default Switch)|23|fec0:0:0:ffff::1,fec0:0:0:ffff::2,fec0:0:0:ffff::3
+vEthernet (WSL (Hyper-V firewall))|23|fec0:0:0:ffff::1,fec0:0:0:ffff::2,fec0:0:0:ffff::3

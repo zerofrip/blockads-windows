@@ -1,0 +1,2 @@
+/mnt/c/ProgramData/BlockAds/config.json
+/mnt/c/ProgramData/BlockAds/filters/catalog.json

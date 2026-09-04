@@ -1,0 +1,2 @@
+-rwxrwxrwx 1 zero zero   5189892 Sep  4 20:29 /mnt/c/Users/zerof/blockads-windows-val/artifacts-tmp/doh_pktmon.etl
+-rwxrwxrwx 1 zero zero 226111252 Sep  4 20:29 /mnt/c/Users/zerof/blockads-windows-val/artifacts-tmp/doh_pktmon.txt

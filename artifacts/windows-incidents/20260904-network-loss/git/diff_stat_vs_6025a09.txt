@@ -1,0 +1,12 @@
+ windows/internal/config/config.go                  |  4 ++
+ windows/internal/config/config_test.go             | 22 ++++++++
+ windows/internal/controller/controller.go          | 65 ++++++++++++++++++----
+ windows/internal/controller/controller_test.go     | 63 +++++++++++++++++++++
+ windows/internal/dnsconfig/configurator_windows.go | 15 +++--
+ windows/internal/dnsconfig/restore_test.go         | 18 ++++++
+ windows/internal/dnsconfig/types.go                | 15 ++++-
+ windows/internal/netwatch/watch_windows.go         | 27 +++++++--
+ windows/internal/service/service_stub.go           |  3 +-
+ windows/internal/service/service_windows.go        |  3 +-
+ windows/internal/statusdto/status.go               | 18 +++---
+ 11 files changed, 220 insertions(+), 33 deletions(-)

@@ -1,0 +1,51 @@
+[
+    {
+        "TimeCreated":  "\/Date(1788527346355)\/",
+        "Id":  7040,
+        "ProviderName":  "Service Control Manager",
+        "LevelDisplayName":  "情報",
+        "Msg":  "Background Intelligent Transfer Service サービスの開始の種類は 自動的な開始 から 要求による開始 に変更されました。"
+    },
+    {
+        "TimeCreated":  "\/Date(1788526741910)\/",
+        "Id":  7040,
+        "ProviderName":  "Service Control Manager",
+        "LevelDisplayName":  "情報",
+        "Msg":  "Background Intelligent Transfer Service サービスの開始の種類は 要求による開始 から 自動的な開始 に変更されました。"
+    },
+    {
+        "TimeCreated":  "\/Date(1788526379733)\/",
+        "Id":  7040,
+        "ProviderName":  "Service Control Manager",
+        "LevelDisplayName":  "情報",
+        "Msg":  "Background Intelligent Transfer Service サービスの開始の種類は 自動的な開始 から 要求による開始 に変更されました。"
+    },
+    {
+        "TimeCreated":  "\/Date(1788525774470)\/",
+        "Id":  7040,
+        "ProviderName":  "Service Control Manager",
+        "LevelDisplayName":  "情報",
+        "Msg":  "Background Intelligent Transfer Service サービスの開始の種類は 要求による開始 から 自動的な開始 に変更されました。"
+    },
+    {
+        "TimeCreated":  "\/Date(1788525771446)\/",
+        "Id":  7045,
+        "ProviderName":  "Service Control Manager",
+        "LevelDisplayName":  "情報",
+        "Msg":  "サービスがシステムにインストールされました。\r\n\r\nサービス名:  WinRing0_1_2_0\r\nサービス ファイル名:  C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\performancedriverextension.inf_amd64_4307518ac694be75\\Service\\OpenHardwareMonitorLib.sys\r\nサービスの種類:  カーネル モード ドライバー\r\nサービス開始の種類:  要求による開始\r\nサービス アカウント:  "
+    },
+    {
+        "TimeCreated":  "\/Date(1788525769616)\/",
+        "Id":  7026,
+        "ProviderName":  "Service Control Manager",
+        "LevelDisplayName":  "情報",
+        "Msg":  "次のブート開始ドライバーまたはシステム開始ドライバーが読み込まれませんでした: \r\naehd\r\ndam"
+    },
+    {
+        "TimeCreated":  "\/Date(1788525768291)\/",
+        "Id":  1014,
+        "ProviderName":  "Microsoft-Windows-DNS-Client",
+        "LevelDisplayName":  "警告",
+        "Msg":  "構成されたどの DNS サーバーも応答しなかった後、名前_ldap._tcp.dc._msdcs.flets-east.jp.の名前解決がタイムアウトになりました。クライアント PID 2352."
+    }
+]

@@ -1,0 +1,31 @@
+﻿{
+  "service": {
+    "version": "0.1.0-windows",
+    "uptime": "3s",
+    "state": "running",
+    "startedAt": "2026-09-04T12:20:01.4212656Z"
+  },
+  "engine": {
+    "state": "DISABLED",
+    "listenerIPv4": "127.0.0.1:53",
+    "listenerIPv6": "[::1]:53",
+    "protocol": "doh",
+    "upstream": "1.1.1.1",
+    "dohUrl": "https://cloudflare-dns.com/dns-query",
+    "filteringEnabled": false
+  },
+  "dns": {
+    "state": "DISABLED",
+    "recoveryRequired": false,
+    "adapters": null
+  },
+  "filters": {
+    "loaded": false,
+    "listIds": null,
+    "lastUpdate": "0001-01-01T00:00:00Z"
+  },
+  "stats": {
+    "totalQueries": 0,
+    "blockedQueries": 0
+  }
+}

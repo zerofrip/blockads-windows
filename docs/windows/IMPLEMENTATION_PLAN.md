@@ -62,3 +62,6 @@ Service + Named Pipe → WPF UI → ProcessResolver → tunnel backend evaluatio
 
 Never leave broken DNS, orphaned routes/adapters/CA/services after clean uninstall.  
 Compare-and-restore only when current DNS equals BlockAds-applied state for that adapter identity.
+
+**DNS-1 (mandatory):** see `docs/windows/SAFETY_DNS1.md` — never leave adapters on BlockAds localhost without a healthy local listener; never overwrite externally changed DNS; never capture ownership Original from localhost.
+

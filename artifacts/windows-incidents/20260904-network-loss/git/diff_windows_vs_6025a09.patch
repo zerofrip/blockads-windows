@@ -1,0 +1,489 @@
+diff --git a/windows/internal/config/config.go b/windows/internal/config/config.go
+index 54d9ccb..e3af04a 100644
+--- a/windows/internal/config/config.go
++++ b/windows/internal/config/config.go
+@@ -1,6 +1,7 @@
+ package config
+ 
+ import (
++	"bytes"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+@@ -84,6 +85,8 @@ func (s *Store) Load() (Config, error) {
+ 		}
+ 		return Config{}, err
+ 	}
++	// Windows PowerShell Set-Content -Encoding utf8 writes a BOM; strip it.
++	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
+ 	var cfg Config
+ 	if err := json.Unmarshal(b, &cfg); err != nil {
+ 		return Config{}, fmt.Errorf("corrupt config (refusing destructive defaults apply): %w", err)
+@@ -127,3 +130,4 @@ func (s *Store) Save(cfg Config) error {
+ 	}
+ 	return os.Rename(tmp, s.Path)
+ }
++
+diff --git a/windows/internal/config/config_test.go b/windows/internal/config/config_test.go
+index d4da306..2b31637 100644
+--- a/windows/internal/config/config_test.go
++++ b/windows/internal/config/config_test.go
+@@ -47,3 +47,25 @@ func TestMissingConfigReturnsDefaults(t *testing.T) {
+ 		t.Fatalf("%+v", cfg)
+ 	}
+ }
++
++func TestLoadStripsUTF8BOM(t *testing.T) {
++	dir := t.TempDir()
++	path := filepath.Join(dir, "config.json")
++	body := []byte("\xef\xbb\xbf" + `{
++  "version": 1,
++  "enabled": false,
++  "dns": {"listenPort": 53, "protocol": "doh", "primary": "1.1.1.1", "fallback": "203.0.113.50", "dohUrl": "https://cloudflare-dns.com/dns-query"},
++  "filters": {"catalogUrl": "http://127.0.0.1/cat.json", "autoUpdate": false}
++}`)
++	if err := os.WriteFile(path, body, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	got, err := (&Store{Path: path}).Load()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.DNS.Protocol != "doh" || got.DNS.DoHURL == "" {
++		t.Fatalf("BOM config not loaded: %+v", got.DNS)
++	}
++}
++
+diff --git a/windows/internal/controller/controller.go b/windows/internal/controller/controller.go
+index 3716ccc..25b5044 100644
+--- a/windows/internal/controller/controller.go
++++ b/windows/internal/controller/controller.go
+@@ -17,6 +17,7 @@ import (
+ 	"github.com/nqmgaming/blockads-windows/windows/internal/config"
+ 	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
+ 	"github.com/nqmgaming/blockads-windows/windows/internal/filters"
++	"github.com/nqmgaming/blockads-windows/windows/internal/netwatch"
+ 	"github.com/nqmgaming/blockads-windows/windows/internal/protocol"
+ 	"github.com/nqmgaming/blockads-windows/windows/internal/singleinstance"
+ 	"github.com/nqmgaming/blockads-windows/windows/internal/statusdto"
+@@ -85,6 +86,30 @@ func (c *Controller) Close() {
+ 	c.lock.Release()
+ }
+ 
++// Startup runs ownership-safe Recover, then applies desired protection state.
++//
++// Policy:
++//   - Recover never blindly restores DNS that was externally changed.
++//   - config.Enabled is the persisted desired protection flag (service running
++//     ≠ filtering). After Recover, if Enabled is true, Enable is invoked so
++//     planned reboot (and SCM restart) restores protection intentionally.
++func (c *Controller) Startup(ctx context.Context) error {
++	_, recErr := c.Recover(ctx)
++	c.mu.Lock()
++	want := c.appConfig.Enabled
++	c.mu.Unlock()
++	if !want {
++		return recErr
++	}
++	if err := c.Enable(ctx); err != nil {
++		if recErr != nil {
++			return fmt.Errorf("recover: %v; enable desired: %w", recErr, err)
++		}
++		return err
++	}
++	return nil
++}
++
+ func newSessionID() string {
+ 	var b [8]byte
+ 	_, _ = rand.Read(b[:])
+@@ -132,6 +157,9 @@ func (c *Controller) Enable(ctx context.Context) error {
+ 	if c.state == dnsconfig.StateActive {
+ 		return nil
+ 	}
++	if cfg, err := c.appCfg.Load(); err == nil {
++		c.appConfig = cfg
++	}
+ 	c.state = dnsconfig.StateStarting
+ 	c.lastErr = ""
+ 	c.portInfo = ""
+@@ -262,10 +290,20 @@ func (c *Controller) Enable(ctx context.Context) error {
+ 	c.session = session
+ 	c.state = dnsconfig.StateActive
+ 	c.appConfig.Enabled = true
+-	_ = c.appCfg.Save(c.appConfig)
++	_ = c.persistEnabledLocked(true)
+ 	return nil
+ }
+ 
++func (c *Controller) persistEnabledLocked(enabled bool) error {
++	cfg := c.appConfig
++	if disk, err := c.appCfg.Load(); err == nil {
++		cfg = disk
++	}
++	cfg.Enabled = enabled
++	c.appConfig = cfg
++	return c.appCfg.Save(cfg)
++}
++
+ func (c *Controller) loadFiltersLocked(ctx context.Context, engine *tunnel.Engine) error {
+ 	cfg := c.appConfig
+ 	entries, err := c.filters.FetchCatalog(ctx, cfg.Filters.CatalogURL)
+@@ -326,8 +364,7 @@ func (c *Controller) Disable(ctx context.Context) error {
+ 		c.engine = nil
+ 	}
+ 	c.session = ""
+-	c.appConfig.Enabled = false
+-	_ = c.appCfg.Save(c.appConfig)
++	_ = c.persistEnabledLocked(false)
+ 	if st != nil && len(st.Adapters) > 0 {
+ 		c.state = dnsconfig.StateDegraded
+ 	} else {
+@@ -342,6 +379,9 @@ func (c *Controller) ReloadFilters(ctx context.Context) error {
+ 	if c.engine == nil {
+ 		return fmt.Errorf("%s: engine not running", protocol.CodeEngineError)
+ 	}
++	if cfg, err := c.appCfg.Load(); err == nil {
++		c.appConfig = cfg
++	}
+ 	if err := c.loadFiltersLocked(ctx, c.engine); err != nil {
+ 		c.filterErr = err.Error()
+ 		return err
+@@ -408,6 +448,7 @@ func (c *Controller) Status() statusdto.Status {
+ 	if port == 0 {
+ 		port = 53
+ 	}
++	nwCB, nwRe := netwatch.Stats()
+ 	st := statusdto.Status{
+ 		Service: statusdto.ServiceStatus{
+ 			Version: AppVersion,
+@@ -416,13 +457,16 @@ func (c *Controller) Status() statusdto.Status {
+ 			Started: c.startedAt,
+ 		},
+ 		Engine: statusdto.EngineStatus{
+-			State:            string(c.state),
+-			ListenerIPv4:     fmt.Sprintf("127.0.0.1:%d", port),
+-			ListenerIPv6:     fmt.Sprintf("[::1]:%d", port),
+-			Protocol:         cfg.DNS.Protocol,
+-			Upstream:         cfg.DNS.Primary,
+-			LastError:        c.lastErr,
+-			FilteringEnabled: c.state == dnsconfig.StateActive,
++			State:             string(c.state),
++			ListenerIPv4:      fmt.Sprintf("127.0.0.1:%d", port),
++			ListenerIPv6:      fmt.Sprintf("[::1]:%d", port),
++			Protocol:          cfg.DNS.Protocol,
++			Upstream:          cfg.DNS.Primary,
++			DoHURL:            cfg.DNS.DoHURL,
++			LastError:         c.lastErr,
++			FilteringEnabled:  c.state == dnsconfig.StateActive,
++			NetwatchCallbacks: nwCB,
++			NetwatchReevals:   nwRe,
+ 		},
+ 		DNS: statusdto.DNSStatus{
+ 			State:            string(c.state),
+@@ -573,3 +617,4 @@ func healthCheckLocalDNS(ctx context.Context, port int) error {
+ 	return nil
+ }
+ 
++
+diff --git a/windows/internal/controller/controller_test.go b/windows/internal/controller/controller_test.go
+index d435e87..f3d005c 100644
+--- a/windows/internal/controller/controller_test.go
++++ b/windows/internal/controller/controller_test.go
+@@ -162,3 +162,66 @@ func TestCrashRecoveryOwnedOnly(t *testing.T) {
+ 		t.Fatal("recovery failed")
+ 	}
+ }
++
++func TestStartupAppliesDesiredEnable(t *testing.T) {
++	key := dnsconfig.AdapterKey{GUID: "{DDDDDDDD-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
++	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
++	dnsconfig.FillChecksum(&orig)
++	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
++		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
++		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
++		IPv4Addrs: []string{"192.168.1.30"},
++	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
++
++	paths := testPaths(t)
++	content := fmt.Sprintf(`{
++  "version": 1,
++  "enabled": true,
++  "dns": {"listenPort": 1855, "protocol": "udp", "primary": "1.1.1.1", "fallback": "1.0.0.1"},
++  "filters": {"catalogUrl": "http://127.0.0.1:1/missing.json", "enabledListIds": [], "autoUpdate": false}
++}`)
++	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	c, err := controller.New(paths, mem)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	if err := c.Startup(ctx); err != nil {
++		t.Fatalf("startup: %v", err)
++	}
++	st := c.Status()
++	if !st.Engine.FilteringEnabled {
++		t.Fatalf("desired enabled should start filtering: %+v", st)
++	}
++	_ = c.Disable(ctx)
++}
++
++func TestStartupSkipsEnableWhenDesiredDisabled(t *testing.T) {
++	key := dnsconfig.AdapterKey{GUID: "{EEEEEEEE-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
++	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
++	dnsconfig.FillChecksum(&orig)
++	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
++		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
++		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
++		IPv4Addrs: []string{"192.168.1.31"},
++	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
++
++	paths := testPaths(t)
++	writeHighPortConfig(t, paths.ConfigFile, 1856)
++	c, err := controller.New(paths, mem)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	if err := c.Startup(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	if c.Status().Engine.FilteringEnabled {
++		t.Fatal("desired disabled must not enable filtering")
++	}
++}
++
+diff --git a/windows/internal/dnsconfig/configurator_windows.go b/windows/internal/dnsconfig/configurator_windows.go
+index 4aba6f0..140db73 100644
+--- a/windows/internal/dnsconfig/configurator_windows.go
++++ b/windows/internal/dnsconfig/configurator_windows.go
+@@ -219,12 +219,16 @@ func (w *winConfigurator) setNameServers(guid windows.GUID, servers DNSServerLis
+ 	if ipv6 {
+ 		settings.Flags |= dnsSettingIPv6
+ 	}
+-	joined := joinServers(servers)
+-	p, err := windows.UTF16PtrFromString(joined)
+-	if err != nil {
+-		return err
++	if len(servers) == 0 {
++		// NULL NameServer with DNS_SETTING_NAMESERVER returns the interface to DHCP.
++		settings.NameServer = nil
++	} else {
++		p, err := windows.UTF16PtrFromString(joinServers(servers))
++		if err != nil {
++			return err
++		}
++		settings.NameServer = p
+ 	}
+-	settings.NameServer = p
+ 	r1, _, _ := procSetInterfaceDnsSettings.Call(
+ 		uintptr(unsafe.Pointer(&guid)),
+ 		uintptr(unsafe.Pointer(&settings)),
+@@ -277,3 +281,4 @@ func (w *winConfigurator) Status() (string, error) {
+ 	return fmt.Sprintf("platform=windows adapters=%d eligible=%d api=Get/SetInterfaceDnsSettings minBuild=19041", len(ads), len(elig)), nil
+ }
+ 
++
+diff --git a/windows/internal/dnsconfig/restore_test.go b/windows/internal/dnsconfig/restore_test.go
+index b3bef7c..fe8e897 100644
+--- a/windows/internal/dnsconfig/restore_test.go
++++ b/windows/internal/dnsconfig/restore_test.go
+@@ -37,6 +37,23 @@ func TestIsEligibleConservative(t *testing.T) {
+ 	}
+ }
+ 
++func TestMatchesAppliedIPv4Authoritative(t *testing.T) {
++	own := dnsconfig.AdapterOwnership{
++		Applied: dnsconfig.LocalhostApplied,
++	}
++	cur := dnsconfig.AdapterDNSSnapshot{
++		IPv4Servers: dnsconfig.DNSServerList{"127.0.0.1"},
++		IPv6Servers: nil, // API often returns empty IPv6
++	}
++	if !own.MatchesApplied(cur) {
++		t.Fatal("IPv4 localhost ownership must hold when IPv6 snapshot is empty")
++	}
++	cur.IPv4Servers = dnsconfig.DNSServerList{"8.8.8.8"}
++	if own.MatchesApplied(cur) {
++		t.Fatal("external IPv4 must not match")
++	}
++}
++
+ func TestCompareAndRestoreOwnership(t *testing.T) {
+ 	key := dnsconfig.AdapterKey{GUID: "{ETH}"}
+ 	orig := dnsconfig.AdapterDNSSnapshot{
+@@ -138,3 +155,4 @@ func TestStateStoreRoundTrip(t *testing.T) {
+ 		t.Fatalf("load failed: %v %+v", err, loaded)
+ 	}
+ }
++
+diff --git a/windows/internal/dnsconfig/types.go b/windows/internal/dnsconfig/types.go
+index d072ead..c38ca0d 100644
+--- a/windows/internal/dnsconfig/types.go
++++ b/windows/internal/dnsconfig/types.go
+@@ -83,8 +83,17 @@ func EqualServers(a, b DNSServerList) bool {
+ 	return true
+ }
+ 
+-// MatchesApplied reports whether current snapshot equals what this session applied.
++// MatchesApplied reports whether current snapshot still equals what this session applied.
++// IPv4 is authoritative. IPv6 is best-effort: Get/SetInterfaceDnsSettings often omit or
++// fail IPv6 DNS on adapters without a usable IPv6 stack, so an empty current IPv6 list
++// does not by itself forfeit IPv4 ownership.
+ func (o AdapterOwnership) MatchesApplied(current AdapterDNSSnapshot) bool {
+-	return EqualServers(current.IPv4Servers, o.Applied.IPv4Servers) &&
+-		EqualServers(current.IPv6Servers, o.Applied.IPv6Servers)
++	if !EqualServers(current.IPv4Servers, o.Applied.IPv4Servers) {
++		return false
++	}
++	if len(o.Applied.IPv6Servers) == 0 || len(current.IPv6Servers) == 0 {
++		return true
++	}
++	return EqualServers(current.IPv6Servers, o.Applied.IPv6Servers)
+ }
++
+diff --git a/windows/internal/netwatch/watch_windows.go b/windows/internal/netwatch/watch_windows.go
+index 5232c7b..7223169 100644
+--- a/windows/internal/netwatch/watch_windows.go
++++ b/windows/internal/netwatch/watch_windows.go
+@@ -5,6 +5,7 @@ package netwatch
+ import (
+ 	"context"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 	"unsafe"
+ 
+@@ -12,31 +13,46 @@ import (
+ )
+ 
+ var (
+-	modIphlpapi              = windows.NewLazySystemDLL("iphlpapi.dll")
++	modIphlpapi                 = windows.NewLazySystemDLL("iphlpapi.dll")
+ 	procNotifyIpInterfaceChange = modIphlpapi.NewProc("NotifyIpInterfaceChange")
+ 	procCancelMibChangeNotify2  = modIphlpapi.NewProc("CancelMibChangeNotify2")
++
++	callbackCount atomic.Uint64
++	reevalCount   atomic.Uint64
+ )
+ 
++// Stats returns NotifyIpInterfaceChange callback and debounced reevaluation counts.
++func Stats() (callbacks, reevaluations uint64) {
++	return callbackCount.Load(), reevalCount.Load()
++}
++
++// ResetStats clears counters (tests/validation only).
++func ResetStats() {
++	callbackCount.Store(0)
++	reevalCount.Store(0)
++}
++
+ // startPlatform registers NotifyIpInterfaceChange with debounce.
+ func startPlatform(ctx context.Context, h Handler) error {
+ 	if err := procNotifyIpInterfaceChange.Find(); err != nil {
+-		// API unavailable — fall back to no-op watcher
+ 		<-ctx.Done()
+ 		return nil
+ 	}
+ 
+ 	var (
+-		mu       sync.Mutex
+-		timer    *time.Timer
+-		handle   uintptr
++		mu     sync.Mutex
++		timer  *time.Timer
++		handle uintptr
+ 	)
+ 	cb := windows.NewCallback(func(callerContext uintptr, row uintptr, notificationType uint32) uintptr {
++		callbackCount.Add(1)
+ 		mu.Lock()
+ 		defer mu.Unlock()
+ 		if timer != nil {
+ 			timer.Stop()
+ 		}
+ 		timer = time.AfterFunc(750*time.Millisecond, func() {
++			reevalCount.Add(1)
+ 			_ = h.ReevaluateAdapters(context.Background())
+ 		})
+ 		return 0
+@@ -50,7 +66,6 @@ func startPlatform(ctx context.Context, h Handler) error {
+ 		uintptr(unsafe.Pointer(&handle)),
+ 	)
+ 	if r1 != 0 {
+-		// Failed to register; soft-fail
+ 		_ = err
+ 		<-ctx.Done()
+ 		return nil
+diff --git a/windows/internal/service/service_stub.go b/windows/internal/service/service_stub.go
+index ba5c10a..3ac3ac2 100644
+--- a/windows/internal/service/service_stub.go
++++ b/windows/internal/service/service_stub.go
+@@ -19,7 +19,7 @@ func Run(paths controller.Paths) error {
+ 		return err
+ 	}
+ 	defer ctrl.Close()
+-	_, _ = ctrl.Recover(context.Background())
++	_ = ctrl.Startup(context.Background())
+ 	ln, err := ipc.ListenPipe("")
+ 	if err != nil {
+ 		return err
+@@ -35,3 +35,4 @@ func Run(paths controller.Paths) error {
+ func InstallHints() string {
+ 	return "Windows Service installation is only available on Windows."
+ }
++
+diff --git a/windows/internal/service/service_windows.go b/windows/internal/service/service_windows.go
+index dcb9b75..e12c8ee 100644
+--- a/windows/internal/service/service_windows.go
++++ b/windows/internal/service/service_windows.go
+@@ -34,7 +34,7 @@ func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, cha
+ 	}
+ 	defer ctrl.Close()
+ 
+-	_, _ = ctrl.Recover(ctx)
++	_ = ctrl.Startup(ctx)
+ 
+ 	ln, err := ipc.ListenPipe("")
+ 	if err != nil {
+@@ -92,3 +92,4 @@ func InstallHints() string {
+ 	exe, _ := filepath.Abs("BlockAdsService.exe")
+ 	return "Use: blockads-service install|uninstall|start|stop|status\nDefault exe: " + exe
+ }
++
+diff --git a/windows/internal/statusdto/status.go b/windows/internal/statusdto/status.go
+index a28ed5a..45ce32e 100644
+--- a/windows/internal/statusdto/status.go
++++ b/windows/internal/statusdto/status.go
+@@ -19,13 +19,16 @@ type ServiceStatus struct {
+ }
+ 
+ type EngineStatus struct {
+-	State       string `json:"state"`
+-	ListenerIPv4 string `json:"listenerIPv4"`
+-	ListenerIPv6 string `json:"listenerIPv6"`
+-	Protocol    string `json:"protocol"`
+-	Upstream    string `json:"upstream"`
+-	LastError   string `json:"lastError,omitempty"`
+-	FilteringEnabled bool `json:"filteringEnabled"`
++	State            string `json:"state"`
++	ListenerIPv4     string `json:"listenerIPv4"`
++	ListenerIPv6     string `json:"listenerIPv6"`
++	Protocol         string `json:"protocol"`
++	Upstream         string `json:"upstream"`
++	DoHURL           string `json:"dohUrl,omitempty"`
++	LastError        string `json:"lastError,omitempty"`
++	FilteringEnabled bool   `json:"filteringEnabled"`
++	NetwatchCallbacks uint64 `json:"netwatchCallbacks,omitempty"`
++	NetwatchReevals   uint64 `json:"netwatchReevaluations,omitempty"`
+ }
+ 
+ type DNSStatus struct {
+@@ -54,3 +57,4 @@ type StatsStatus struct {
+ 	TotalQueries   int64 `json:"totalQueries"`
+ 	BlockedQueries int64 `json:"blockedQueries"`
+ }
++
