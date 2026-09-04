@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -18,8 +16,15 @@ const (
 // MmapTrie represents a read-only memory-mapped DomainTrie.
 type MmapTrie struct {
 	file   *os.File
-	buffer []byte
+	mapped *mappedFile
 	limit  int
+}
+
+func (m *MmapTrie) buffer() []byte {
+	if m == nil || m.mapped == nil {
+		return nil
+	}
+	return m.mapped.Bytes()
 }
 
 // LoadMmapTrie opens a file and memory-maps its contents.
@@ -45,39 +50,39 @@ func LoadMmapTrie(path string) (*MmapTrie, error) {
 		return nil, fmt.Errorf("file too small to be a valid trie")
 	}
 
-	// Memory map the file (Read Only)
-	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_SHARED)
+	mapped, err := mapReadOnly(f, size)
 	if err != nil {
 		f.Close()
-		return nil, fmt.Errorf("mmap failed: %w", err)
+		return nil, err
 	}
 
+	data := mapped.Bytes()
 	magic := binary.BigEndian.Uint32(data[0:4])
 	if magic != trieMagic {
-		unix.Munmap(data)
+		_ = mapped.Close()
 		f.Close()
 		return nil, fmt.Errorf("invalid trie magic: expected %X, got %X", trieMagic, magic)
 	}
 
 	version := binary.BigEndian.Uint32(data[4:8])
 	if version != trieVersion {
-		unix.Munmap(data)
+		_ = mapped.Close()
 		f.Close()
 		return nil, fmt.Errorf("invalid trie version: expected %d, got %d", trieVersion, version)
 	}
 
 	return &MmapTrie{
 		file:   f,
-		buffer: data,
+		mapped: mapped,
 		limit:  int(size),
 	}, nil
 }
 
 // Close unmaps the memory and closes the file.
 func (m *MmapTrie) Close() {
-	if m.buffer != nil {
-		unix.Munmap(m.buffer)
-		m.buffer = nil
+	if m.mapped != nil {
+		_ = m.mapped.Close()
+		m.mapped = nil
 	}
 	if m.file != nil {
 		m.file.Close()
@@ -88,15 +93,13 @@ func (m *MmapTrie) Close() {
 // ContainsOrParent checks if a domain or any of its parent domains exists in the trie.
 // It also checks for wildcard (*) matches from top to bottom.
 func (m *MmapTrie) ContainsOrParent(domain string) bool {
-	if m.buffer == nil {
+	if m.buffer() == nil {
 		return false
 	}
-	// Split and sanitize labels
 	labels := strings.Split(domain, ".")
 	return m.matchWithWildcard(headerSize, labels, len(labels)-1)
 }
 
-// matchWithWildcard recursively checks exact and wildcard matches.
 func (m *MmapTrie) matchWithWildcard(nodeOffset int, labels []string, index int) bool {
 	if index < 0 {
 		return false
@@ -107,7 +110,6 @@ func (m *MmapTrie) matchWithWildcard(nodeOffset int, labels []string, index int)
 
 	targetLabel := labels[index]
 
-	// 1. Try exact label match
 	exactOffset := m.findChildOffset(nodeOffset, targetLabel)
 	if exactOffset != -1 {
 		if m.isTerminal(exactOffset) {
@@ -118,7 +120,6 @@ func (m *MmapTrie) matchWithWildcard(nodeOffset int, labels []string, index int)
 		}
 	}
 
-	// 2. Try wildcard `*` match
 	wildcardOffset := m.findChildOffset(nodeOffset, "*")
 	if wildcardOffset != -1 {
 		if m.isTerminal(wildcardOffset) {
@@ -133,14 +134,16 @@ func (m *MmapTrie) matchWithWildcard(nodeOffset int, labels []string, index int)
 }
 
 func (m *MmapTrie) isTerminal(nodeOffset int) bool {
-	if nodeOffset < 0 || nodeOffset >= m.limit {
+	buf := m.buffer()
+	if buf == nil || nodeOffset < 0 || nodeOffset >= m.limit {
 		return false
 	}
-	return m.buffer[nodeOffset] != 0
+	return buf[nodeOffset] != 0
 }
 
 func (m *MmapTrie) findChildOffset(nodeOffset int, targetLabel string) int {
-	if nodeOffset < 0 || nodeOffset+5 > m.limit {
+	buf := m.buffer()
+	if buf == nil || nodeOffset < 0 || nodeOffset+5 > m.limit {
 		return -1
 	}
 
@@ -149,41 +152,39 @@ func (m *MmapTrie) findChildOffset(nodeOffset int, targetLabel string) int {
 
 	pos := nodeOffset + 1 // skip isTerminal byte
 
-	// BigEndian: read uint32 (4 bytes) for child count
-	childCount := int(binary.BigEndian.Uint32(m.buffer[pos : pos+4]))
+	childCount := int(binary.BigEndian.Uint32(buf[pos : pos+4]))
 	pos += 4
 
 	for c := 0; c < childCount; c++ {
 		if pos+2 > m.limit {
-			return -1 // buffer too short
+			return -1
 		}
-		labelLen := int(binary.BigEndian.Uint16(m.buffer[pos : pos+2]))
+		labelLen := int(binary.BigEndian.Uint16(buf[pos : pos+2]))
 		pos += 2
 
 		if pos+labelLen+4 > m.limit {
-			return -1 // corrupted data
+			return -1
 		}
 
 		if labelLen == targetLen {
 			match := true
 			for b := 0; b < labelLen; b++ {
-				if m.buffer[pos+b] != targetBytes[b] {
+				if buf[pos+b] != targetBytes[b] {
 					match = false
 					break
 				}
 			}
 			if match {
-				childOffset := int(binary.BigEndian.Uint32(m.buffer[pos+labelLen : pos+labelLen+4]))
+				childOffset := int(binary.BigEndian.Uint32(buf[pos+labelLen : pos+labelLen+4]))
 				if childOffset < headerSize || childOffset >= m.limit {
-					// Invalid offset
 					return -1
 				}
 				return childOffset
 			}
 		}
 
-		pos += labelLen + 4 // skip label bytes + child offset
+		pos += labelLen + 4
 	}
 
-	return -1 // label not found
+	return -1
 }

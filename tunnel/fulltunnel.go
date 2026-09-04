@@ -4,7 +4,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -156,7 +155,7 @@ func (e *Engine) StartFull(fd int, protector SocketProtector) {
 
 	// Own the TUN fd (dup to avoid Android fdsan unique_fd crashes when the
 	// ParcelFileDescriptor on the Kotlin side is closed).
-	dupFd, err := syscall.Dup(fd)
+	dupFd, err := dupFileDescriptor(fd)
 	if err != nil {
 		fail("StartFull: dup TUN fd %d failed: %v", fd, err)
 		return
@@ -326,3 +325,4 @@ func (w *udpDNSResponseWriter) Close() error   { return nil }
 func (w *udpDNSResponseWriter) TsigStatus() error { return nil }
 func (w *udpDNSResponseWriter) TsigTimersOnly(bool) {}
 func (w *udpDNSResponseWriter) Hijack()             {}
+

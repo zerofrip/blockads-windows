@@ -3,7 +3,6 @@ package tunnel
 import (
 	"encoding/binary"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"hash/fnv"
 	"math"
 	"os"
@@ -25,9 +24,16 @@ const (
 // This eliminates trie traversal for ~90%+ of clean DNS queries.
 type BloomFilter struct {
 	file      *os.File
-	buffer    []byte
+	mapped    *mappedFile
 	bitCount  uint64
 	hashCount uint32
+}
+
+func (bf *BloomFilter) buffer() []byte {
+	if bf == nil || bf.mapped == nil {
+		return nil
+	}
+	return bf.mapped.Bytes()
 }
 
 // BloomBuilder is used to construct a Bloom Filter and serialize it to a file.
@@ -153,22 +159,23 @@ func LoadBloomFilter(path string) (*BloomFilter, error) {
 		return nil, fmt.Errorf("file too small to be a valid bloom filter")
 	}
 
-	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_SHARED)
+	mapped, err := mapReadOnly(f, size)
 	if err != nil {
 		f.Close()
-		return nil, fmt.Errorf("mmap failed: %w", err)
+		return nil, err
 	}
 
+	data := mapped.Bytes()
 	magic := binary.BigEndian.Uint32(data[0:4])
 	if magic != bloomMagic {
-		unix.Munmap(data)
+		_ = mapped.Close()
 		f.Close()
 		return nil, fmt.Errorf("invalid bloom magic: expected %X, got %X", bloomMagic, magic)
 	}
 
 	version := binary.BigEndian.Uint32(data[4:8])
 	if version != bloomVersion {
-		unix.Munmap(data)
+		_ = mapped.Close()
 		f.Close()
 		return nil, fmt.Errorf("invalid bloom version: expected %d, got %d", bloomVersion, version)
 	}
@@ -178,14 +185,14 @@ func LoadBloomFilter(path string) (*BloomFilter, error) {
 
 	expectedSize := int64(bloomHeaderSize) + int64(bitCount/8)
 	if size < expectedSize {
-		unix.Munmap(data)
+		_ = mapped.Close()
 		f.Close()
 		return nil, fmt.Errorf("bloom file truncated: expected %d bytes, got %d", expectedSize, size)
 	}
 
 	return &BloomFilter{
 		file:      f,
-		buffer:    data,
+		mapped:    mapped,
 		bitCount:  bitCount,
 		hashCount: hashCount,
 	}, nil
@@ -193,9 +200,9 @@ func LoadBloomFilter(path string) (*BloomFilter, error) {
 
 // Close unmaps the memory and closes the file.
 func (bf *BloomFilter) Close() {
-	if bf.buffer != nil {
-		unix.Munmap(bf.buffer)
-		bf.buffer = nil
+	if bf.mapped != nil {
+		_ = bf.mapped.Close()
+		bf.mapped = nil
 	}
 	if bf.file != nil {
 		bf.file.Close()
@@ -206,17 +213,18 @@ func (bf *BloomFilter) Close() {
 // MightContain checks if a single domain string might be in the set.
 // Returns false = definitely NOT blocked, true = maybe blocked (need trie confirmation).
 func (bf *BloomFilter) MightContain(domain string) bool {
-	if bf.buffer == nil {
+	buf := bf.buffer()
+	if buf == nil {
 		return true // fail-open: if bloom is broken, fall through to trie
 	}
 	h1, h2 := bloomDoubleHash(domain)
 	for i := uint32(0); i < bf.hashCount; i++ {
 		idx := (h1 + uint64(i)*h2) % bf.bitCount
 		byteIdx := bloomHeaderSize + int(idx/8)
-		if byteIdx >= len(bf.buffer) {
+		if byteIdx >= len(buf) {
 			return true // out of bounds, fail-open
 		}
-		if bf.buffer[byteIdx]&(1<<(idx%8)) == 0 {
+		if buf[byteIdx]&(1<<(idx%8)) == 0 {
 			return false // definitely not in set
 		}
 	}
@@ -230,7 +238,7 @@ func (bf *BloomFilter) MightContain(domain string) bool {
 //
 // Returns false only if ALL levels are definitely NOT in the filter.
 func (bf *BloomFilter) MightContainDomainOrParent(domain string) bool {
-	if bf.buffer == nil {
+	if bf.buffer() == nil {
 		return true // fail-open
 	}
 	d := domain
@@ -271,3 +279,4 @@ func bloomDoubleHash(s string) (uint64, uint64) {
 
 	return v1, v2
 }
+

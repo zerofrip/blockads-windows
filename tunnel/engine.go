@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -441,7 +440,7 @@ func (e *Engine) Start(fd int, protector SocketProtector, wgConfigJSON string) {
 	e.mu.Unlock()
 
 	// Duplicate fd to take proper ownership and avoid Android fdsan unique_fd crashes
-	dupFd, err := syscall.Dup(fd)
+	dupFd, err := dupFileDescriptor(fd)
 	if err != nil {
 		logf("Failed to dup TUN fd %d: %v", fd, err)
 		e.running = false
