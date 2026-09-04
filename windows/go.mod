@@ -3,6 +3,7 @@ module github.com/nqmgaming/blockads-windows/windows
 go 1.23.5
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/miekg/dns v1.1.62
 	github.com/nqmgaming/blockads-tunnel v0.0.0
 	golang.org/x/sys v0.35.0

@@ -10,7 +10,7 @@
 | DnsConfigurator | VpnService DNS | Native IP Helper | IMPLEMENTED | Get/SetInterfaceDnsSettings; runtime UNVERIFIED |
 | Adapter policy | UID/app bypass | Eligibility policy | IMPLEMENTED | Ethernet/Wi-Fi conservative |
 | blockads-cli | N/A | CLI | IMPLEMENTED | enable/disable/status/recover/test-dns |
-| Windows Service | Foreground svc | SCM service | NOT_STARTED | Phase 3 |
+| Windows Service | Foreground svc | SCM service | IN_PROGRESS | svc + Named Pipe IPC skeleton |
 | Desktop UI | Compose | WPF | NOT_STARTED | Phase 4 |
 | Process identity | UID/package | PID/path | NOT_STARTED | Phase 5 |
 | Packet tunnel | VpnService TUN | Wintun candidate | NOT_STARTED | Phase 6 — not locked |

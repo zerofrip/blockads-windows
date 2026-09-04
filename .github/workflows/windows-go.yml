@@ -69,4 +69,6 @@ jobs:
         run: go test ./... -count=1
       - name: Build blockads-cli
         run: go build -o ../build/blockads-cli${{ matrix.os == 'windows-latest' && '.exe' || '' }} ./cmd/blockads-cli
+      - name: Build blockads-service
+        run: go build -o ../build/blockads-service${{ matrix.os == 'windows-latest' && '.exe' || '' }} ./cmd/blockads-service
 
