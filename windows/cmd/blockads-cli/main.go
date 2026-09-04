@@ -6,136 +6,164 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/miekg/dns"
+	"github.com/nqmgaming/blockads-windows/windows/internal/client"
 	"github.com/nqmgaming/blockads-windows/windows/internal/controller"
 	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
+	"github.com/nqmgaming/blockads-windows/windows/internal/protocol"
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+	devDirect := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--dev-direct" {
+			devDirect = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	args = filtered
+	if len(args) < 1 {
 		usage()
 		os.Exit(2)
 	}
-	cmd := os.Args[1]
-	paths := defaultPaths()
-	cfg := dnsconfig.NewPlatformConfigurator()
-	c := controller.New(paths, cfg)
-	c.SetConfig(controller.Config{
-		ListenPort:  53,
-		DNSProtocol: envOr("BLOCKADS_DNS_PROTOCOL", "udp"),
-		PrimaryDNS:  envOr("BLOCKADS_PRIMARY_DNS", "1.1.1.1"),
-		FallbackDNS: envOr("BLOCKADS_FALLBACK_DNS", "1.0.0.1"),
-		DoHURL:      os.Getenv("BLOCKADS_DOH_URL"),
-		AdTrieCSV:   os.Getenv("BLOCKADS_AD_TRIE"),
-		AdBloomCSV:  os.Getenv("BLOCKADS_AD_BLOOM"),
-		SecTrieCSV:  os.Getenv("BLOCKADS_SEC_TRIE"),
-		SecBloomCSV: os.Getenv("BLOCKADS_SEC_BLOOM"),
-	})
 
-	switch cmd {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if devDirect {
+		runDevDirect(ctx, args)
+		return
+	}
+	runIPC(ctx, args)
+}
+
+func runIPC(ctx context.Context, args []string) {
+	cli := client.New()
+	switch args[0] {
 	case "status":
-		st := c.Status()
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(st)
-		dnsSt, _ := cfg.Status()
-		fmt.Println("dnsConfigurator:", dnsSt)
+		st, err := cli.Status(ctx)
+		exitJSON(st, err)
 	case "enable":
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := c.Enable(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "enable failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("enabled")
-		_ = json.NewEncoder(os.Stdout).Encode(c.Status())
+		st, err := cli.Enable(ctx)
+		exitJSON(st, err)
 	case "disable":
-		if err := c.Disable(); err != nil {
-			fmt.Fprintf(os.Stderr, "disable failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("disabled")
+		st, err := cli.Disable(ctx)
+		exitJSON(st, err)
 	case "recover":
-		results, err := c.RecoverIfNeeded()
+		raw, err := cli.Recover(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "recover failed: %v\n", err)
-			os.Exit(1)
+			fail(err)
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(results)
+		fmt.Println(string(raw))
 	case "test-dns":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: blockads-cli test-dns <domain>")
 			os.Exit(2)
 		}
-		domain := os.Args[2]
-		if err := testDNS(domain); err != nil {
-			fmt.Fprintf(os.Stderr, "test-dns failed: %v\n", err)
-			os.Exit(1)
+		res, err := cli.TestDNS(ctx, args[1])
+		exitJSON(res, err)
+	case "reload-filters":
+		raw, err := cli.ReloadFilters(ctx)
+		if err != nil {
+			fail(err)
 		}
+		fmt.Println(string(raw))
+	case "stats":
+		res, err := cli.GetStats(ctx)
+		exitJSON(res, err)
 	default:
 		usage()
 		os.Exit(2)
 	}
 }
 
-func testDNS(domain string) error {
-	client := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
-	r, _, err := client.Exchange(m, "127.0.0.1:53")
+func runDevDirect(ctx context.Context, args []string) {
+	fmt.Fprintln(os.Stderr, "WARNING: --dev-direct bypasses the service; privileged ops run in-process")
+	paths := defaultPaths()
+	ctrl, err := controller.New(paths, dnsconfig.NewPlatformConfigurator())
 	if err != nil {
-		return err
+		fail(err)
 	}
-	fmt.Printf("rcode=%s answers=%d\n", dns.RcodeToString[r.Rcode], len(r.Answer))
-	for _, rr := range r.Answer {
-		fmt.Println(rr.String())
+	defer ctrl.Close()
+	switch args[0] {
+	case "status":
+		exitJSON(ctrl.Status(), nil)
+	case "enable":
+		if err := ctrl.Enable(ctx); err != nil {
+			fail(err)
+		}
+		exitJSON(ctrl.Status(), nil)
+	case "disable":
+		if err := ctrl.Disable(ctx); err != nil {
+			fail(err)
+		}
+		exitJSON(ctrl.Status(), nil)
+	case "recover":
+		res, err := ctrl.Recover(ctx)
+		exitJSON(res, err)
+	case "test-dns":
+		if len(args) < 2 {
+			os.Exit(2)
+		}
+		res, err := ctrl.TestDNS(ctx, args[1])
+		exitJSON(res, err)
+	default:
+		usage()
+		os.Exit(2)
 	}
-	return nil
+}
+
+func exitJSON(v any, err error) {
+	if err != nil {
+		fail(err)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+func fail(err error) {
+	if err == nil {
+		return
+	}
+	code := protocol.CodeInternal
+	if strings.Contains(err.Error(), protocol.CodeServiceUnavailable) {
+		code = protocol.CodeServiceUnavailable
+	}
+	fmt.Fprintf(os.Stderr, "%s: %v\n", code, err)
+	os.Exit(1)
 }
 
 func defaultPaths() controller.Paths {
 	base := os.Getenv("BLOCKADS_DATA_DIR")
 	if base == "" {
-		programData := os.Getenv("PROGRAMDATA")
-		if programData == "" {
-			programData = filepath.Join(os.TempDir(), "BlockAds")
+		pd := os.Getenv("PROGRAMDATA")
+		if pd == "" {
+			pd = filepath.Join(os.TempDir(), "BlockAds")
 		}
-		base = filepath.Join(programData, "BlockAds")
+		base = filepath.Join(pd, "BlockAds")
 	}
 	return controller.Paths{
-		DataDir:   base,
-		StateFile: filepath.Join(base, "state", "recovery.json"),
-		FilterDir: filepath.Join(base, "filters"),
+		DataDir:    base,
+		StateFile:  filepath.Join(base, "state", "recovery.json"),
+		ConfigFile: filepath.Join(base, "config.json"),
+		FilterDir:  filepath.Join(base, "filters"),
 	}
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `blockads-cli — BlockAds Windows DNS MVP
+	fmt.Fprintf(os.Stderr, `blockads-cli — IPC client for BlockAdsService
 
 Usage:
-  blockads-cli status
-  blockads-cli enable
-  blockads-cli disable
-  blockads-cli recover
+  blockads-cli status|enable|disable|recover|stats|reload-filters
   blockads-cli test-dns <domain>
+  blockads-cli --dev-direct <cmd>   # explicit in-process (dev/test only)
 
-Environment:
-  BLOCKADS_DATA_DIR       data root (default %%PROGRAMDATA%%\BlockAds)
-  BLOCKADS_DNS_PROTOCOL   udp|doh|... (default udp)
-  BLOCKADS_PRIMARY_DNS    upstream (default 1.1.1.1)
-  BLOCKADS_DOH_URL        DoH endpoint when protocol=doh
-  BLOCKADS_AD_TRIE        CSV of ad trie paths
-  BLOCKADS_AD_BLOOM       CSV of ad bloom paths
+Production commands use the Named Pipe. No silent privileged fallback.
 `)
 }

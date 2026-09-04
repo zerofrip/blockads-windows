@@ -4,31 +4,37 @@ package service
 
 import (
 	"context"
-	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/nqmgaming/blockads-windows/windows/internal/controller"
 	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
 	"github.com/nqmgaming/blockads-windows/windows/internal/ipc"
+	"github.com/nqmgaming/blockads-windows/windows/internal/netwatch"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
 )
-
-const ServiceName = "BlockAdsService"
-const ServiceDisplayName = "BlockAds DNS Filter"
 
 type blockAdsService struct {
 	paths controller.Paths
 }
 
 func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
+	const accepts = svc.AcceptStop | svc.AcceptShutdown
+
 	changes <- svc.Status{State: svc.StartPending}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	dnsCfg := dnsconfig.NewPlatformConfigurator()
-	ctrl := controller.New(s.paths, dnsCfg)
-	_, _ = ctrl.RecoverIfNeeded()
+	ctrl, err := controller.New(s.paths, dnsCfg)
+	if err != nil {
+		changes <- svc.Status{State: svc.StopPending}
+		return true, 1
+	}
+	defer ctrl.Close()
+
+	_, _ = ctrl.Recover(ctx)
 
 	ln, err := ipc.ListenPipe("")
 	if err != nil {
@@ -40,14 +46,16 @@ func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, cha
 	srv := &ipc.Server{Handler: &ipc.Handler{Ctrl: ctrl}}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx, ln) }()
+	go func() { _ = netwatch.Start(ctx, ctrl) }()
 
-	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	changes <- svc.Status{State: svc.Running, Accepts: accepts}
 
 	for {
 		select {
 		case err := <-errCh:
+			cancel()
+			_ = ctrl.Disable(context.Background())
 			if err != nil {
-				_ = ctrl.Disable()
 				return true, 1
 			}
 			return false, 0
@@ -58,18 +66,16 @@ func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, cha
 			case svc.Stop, svc.Shutdown:
 				changes <- svc.Status{State: svc.StopPending}
 				cancel()
-				_ = ctrl.Disable()
-				time.Sleep(200 * time.Millisecond)
+				_ = ctrl.Disable(context.Background())
+				time.Sleep(100 * time.Millisecond)
 				changes <- svc.Status{State: svc.Stopped}
 				return false, 0
-			default:
-				// ignore
 			}
 		}
 	}
 }
 
-// Run runs as a Windows Service when launched by SCM; otherwise as console debug.
+// Run hosts the service under SCM or as a console debug process.
 func Run(paths controller.Paths) error {
 	isSvc, err := svc.IsWindowsService()
 	if err != nil {
@@ -82,11 +88,7 @@ func Run(paths controller.Paths) error {
 	return debug.Run(ServiceName, s)
 }
 
-// InstallHints returns sc.exe-style guidance without shelling out.
 func InstallHints() string {
-	return fmt.Sprintf(`Install (elevated PowerShell / SCM):
-  sc.exe create %s binPath= "C:\\Path\\To\\BlockAdsService.exe" start= auto
-  sc.exe description %s "BlockAds system DNS filtering service"
-  sc.exe start %s
-`, ServiceName, ServiceName, ServiceName)
+	exe, _ := filepath.Abs("BlockAdsService.exe")
+	return "Use: blockads-service install|uninstall|start|stop|status\nDefault exe: " + exe
 }

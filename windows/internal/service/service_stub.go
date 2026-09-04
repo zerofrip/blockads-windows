@@ -9,15 +9,17 @@ import (
 	"github.com/nqmgaming/blockads-windows/windows/internal/controller"
 	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
 	"github.com/nqmgaming/blockads-windows/windows/internal/ipc"
+	"github.com/nqmgaming/blockads-windows/windows/internal/netwatch"
 )
 
-const ServiceName = "BlockAdsService"
-
-// Run starts a foreground IPC server for non-Windows development.
 func Run(paths controller.Paths) error {
 	dnsCfg := dnsconfig.NewPlatformConfigurator()
-	ctrl := controller.New(paths, dnsCfg)
-	_, _ = ctrl.RecoverIfNeeded()
+	ctrl, err := controller.New(paths, dnsCfg)
+	if err != nil {
+		return err
+	}
+	defer ctrl.Close()
+	_, _ = ctrl.Recover(context.Background())
 	ln, err := ipc.ListenPipe("")
 	if err != nil {
 		return err
@@ -25,7 +27,9 @@ func Run(paths controller.Paths) error {
 	defer ln.Close()
 	fmt.Println("BlockAds IPC listening (dev):", ln.Addr())
 	srv := &ipc.Server{Handler: &ipc.Handler{Ctrl: ctrl}}
-	return srv.Serve(context.Background(), ln)
+	ctx := context.Background()
+	go func() { _ = netwatch.Start(ctx, ctrl) }()
+	return srv.Serve(ctx, ln)
 }
 
 func InstallHints() string {
