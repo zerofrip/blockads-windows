@@ -17,6 +17,7 @@ import (
 	"github.com/nqmgaming/blockads-windows/windows/internal/config"
 	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
 	"github.com/nqmgaming/blockads-windows/windows/internal/filters"
+	"github.com/nqmgaming/blockads-windows/windows/internal/netwatch"
 	"github.com/nqmgaming/blockads-windows/windows/internal/protocol"
 	"github.com/nqmgaming/blockads-windows/windows/internal/singleinstance"
 	"github.com/nqmgaming/blockads-windows/windows/internal/statusdto"
@@ -55,6 +56,24 @@ type Controller struct {
 	filterErr string
 	filterAt  time.Time
 	acceptMut bool // false while stopping
+
+	// DNS-1 safety instrumentation (see safety.go).
+	healthProbe         HealthProbe
+	watchdogStop        chan struct{}
+	healthFailCount     int
+	listenerHealthy     bool
+	lastHealthFailure   string
+	lastHealthFailureAt time.Time
+	lastRecoveryAction  string
+	lastDnsApply        time.Time
+	lastDnsRestore      time.Time
+	lastNetworkChange   time.Time
+	lastRestoreError    string
+	suspectedUnproven   []string
+	ownershipGeneration int64
+	watchdogEvery       time.Duration // 0 → default
+	watchdogFails       int           // 0 → default
+	testBypassEngine    bool          // tests only; never set in production
 }
 
 func New(paths Paths, dnsCfg dnsconfig.DnsConfigurator) (*Controller, error) {
@@ -83,6 +102,32 @@ func New(paths Paths, dnsCfg dnsconfig.DnsConfigurator) (*Controller, error) {
 
 func (c *Controller) Close() {
 	c.lock.Release()
+}
+
+// Startup runs ownership-safe Recover, scans unproven localhost (no auto-mutate),
+// restores only proven ownership leftovers, then applies desired protection.
+func (c *Controller) Startup(ctx context.Context) error {
+	_, recErr := c.Recover(ctx)
+	c.mu.Lock()
+	// Proven ownership only — never auto-reset UNPROVEN_LOCALHOST.
+	_ = c.restoreOwnedLocalhostLocked()
+	c.scanUnprovenLocalhostLocked()
+	want := c.appConfig.Enabled
+	c.mu.Unlock()
+	if !want {
+		return recErr
+	}
+	if err := c.Enable(ctx); err != nil {
+		c.mu.Lock()
+		_ = c.restoreOwnedLocalhostLocked()
+		c.scanUnprovenLocalhostLocked()
+		c.mu.Unlock()
+		if recErr != nil {
+			return fmt.Errorf("recover: %v; enable desired: %w", recErr, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func newSessionID() string {
@@ -132,6 +177,9 @@ func (c *Controller) Enable(ctx context.Context) error {
 	if c.state == dnsconfig.StateActive {
 		return nil
 	}
+	if cfg, err := c.appCfg.Load(); err == nil {
+		c.appConfig = cfg
+	}
 	c.state = dnsconfig.StateStarting
 	c.lastErr = ""
 	c.portInfo = ""
@@ -178,9 +226,15 @@ func (c *Controller) Enable(ctx context.Context) error {
 		return fmt.Errorf("%w: %v", dnsconfig.ErrListenerUnhealthy, err)
 	}
 
+	// Assign engine before any DNS apply so mayApplyLocalDns can authorize.
+	c.engine = engine
+	c.checker = checker
+	c.listenerHealthy = true
+
 	adapters, err := c.dns.ListAdapters()
 	if err != nil {
 		engine.Stop()
+		c.engine = nil
 		c.state = dnsconfig.StateDisabled
 		c.lastErr = err.Error()
 		return err
@@ -188,6 +242,7 @@ func (c *Controller) Enable(ctx context.Context) error {
 	eligible := dnsconfig.FilterEligible(adapters)
 	if len(eligible) == 0 {
 		engine.Stop()
+		c.engine = nil
 		c.state = dnsconfig.StateDisabled
 		c.lastErr = "no eligible adapters"
 		return fmt.Errorf("no eligible network adapters for DNS configuration")
@@ -205,7 +260,9 @@ func (c *Controller) Enable(ctx context.Context) error {
 			}
 			_ = dnsconfig.CompareAndRestore(c.dns, own, cur, true)
 		}
+		c.stopWatchdogLocked()
 		engine.Stop()
+		c.engine = nil
 	}
 
 	for _, a := range eligible {
@@ -218,8 +275,22 @@ func (c *Controller) Enable(ctx context.Context) error {
 			return err
 		}
 		snap.FriendlyName = a.FriendlyName
-		own := dnsconfig.AdapterOwnership{
-			Key: a.Key, Original: snap, Applied: dnsconfig.LocalhostApplied, UpdatedAt: time.Now().UTC(),
+		if !dnsconfig.CanBecomeOriginal(snap) {
+			// SUSPECT_LOCALHOST_ORPHAN — do not invent Original=localhost; do not blind-reset.
+			c.scanUnprovenLocalhostLocked()
+			rollback()
+			c.state = dnsconfig.StateRecoveryRequired
+			c.lastErr = fmt.Sprintf("adapter %s has localhost DNS without trustworthy Original (class=%s); use emergency-restore for proven ownership or --force-unproven-localhost",
+				a.Key.GUID, dnsconfig.ClassifyDNS(snap))
+			return fmt.Errorf("%s", c.lastErr)
+		}
+		c.ownershipGeneration++
+		own, err := dnsconfig.BeginOwnership(a.Key, snap, session, c.ownershipGeneration)
+		if err != nil {
+			rollback()
+			c.state = dnsconfig.StateDisabled
+			c.lastErr = err.Error()
+			return err
 		}
 		st := &dnsconfig.RecoveryState{
 			Version: dnsconfig.RecoveryStateVersion, PolicyVersion: dnsconfig.AdapterPolicyVersion,
@@ -234,13 +305,20 @@ func (c *Controller) Enable(ctx context.Context) error {
 			c.lastErr = err.Error()
 			return err
 		}
-		if err := c.dns.ApplyLocalhost(a.Key); err != nil {
+		if err := c.applyLocalhostGuardedLocked(ctx, a.Key); err != nil {
 			rollback()
 			c.state = dnsconfig.StateDisabled
 			c.lastErr = err.Error()
 			_ = c.cfgStore.Clear()
 			return err
 		}
+		if err := own.MarkOwned(); err != nil {
+			rollback()
+			c.state = dnsconfig.StateDisabled
+			c.lastErr = err.Error()
+			return err
+		}
+		c.lastDnsApply = time.Now().UTC()
 		ownership = append(ownership, own)
 	}
 
@@ -257,13 +335,22 @@ func (c *Controller) Enable(ctx context.Context) error {
 		return err
 	}
 
-	c.engine = engine
-	c.checker = checker
 	c.session = session
 	c.state = dnsconfig.StateActive
 	c.appConfig.Enabled = true
-	_ = c.appCfg.Save(c.appConfig)
+	_ = c.persistEnabledLocked(true)
+	c.startWatchdogLocked()
 	return nil
+}
+
+func (c *Controller) persistEnabledLocked(enabled bool) error {
+	cfg := c.appConfig
+	if disk, err := c.appCfg.Load(); err == nil {
+		cfg = disk
+	}
+	cfg.Enabled = enabled
+	c.appConfig = cfg
+	return c.appCfg.Save(cfg)
 }
 
 func (c *Controller) loadFiltersLocked(ctx context.Context, engine *tunnel.Engine) error {
@@ -301,35 +388,28 @@ func (c *Controller) Disable(ctx context.Context) error {
 	c.acceptMut = false
 	defer func() { c.acceptMut = true }()
 	c.state = dnsconfig.StateStopping
+	c.stopWatchdogLocked()
 
-	st, err := c.cfgStore.Load()
-	if err != nil {
-		c.lastErr = err.Error()
-		return err
-	}
-	if st != nil && len(st.Adapters) > 0 {
-		_, err := dnsconfig.ReconcileRecovery(c.dns, st)
-		if err != nil {
-			c.lastErr = err.Error()
-			c.state = dnsconfig.StateDegraded
-			_ = c.cfgStore.Save(st)
-			return err
-		}
-		if len(st.Adapters) == 0 {
-			_ = c.cfgStore.Clear()
-		} else {
-			_ = c.cfgStore.Save(st)
+	results := c.restoreOwnedLocalhostLocked()
+	for _, r := range results {
+		if r.Decision == dnsconfig.RestoreApplied {
+			c.lastRecoveryAction = "disable_restore"
 		}
 	}
+	c.scanUnprovenLocalhostLocked()
+
 	if c.engine != nil {
 		c.engine.Stop()
 		c.engine = nil
 	}
 	c.session = ""
-	c.appConfig.Enabled = false
-	_ = c.appCfg.Save(c.appConfig)
-	if st != nil && len(st.Adapters) > 0 {
-		c.state = dnsconfig.StateDegraded
+	c.listenerHealthy = false
+	_ = c.persistEnabledLocked(false)
+	st, _ := c.cfgStore.Load()
+	if st != nil && (len(st.Adapters) > 0 || len(st.SuspectedUnprovenLocalhost) > 0) {
+		c.state = dnsconfig.StateRecoveryRequired
+	} else if len(c.suspectedUnproven) > 0 {
+		c.state = dnsconfig.StateRecoveryRequired
 	} else {
 		c.state = dnsconfig.StateDisabled
 	}
@@ -341,6 +421,9 @@ func (c *Controller) ReloadFilters(ctx context.Context) error {
 	defer c.mu.Unlock()
 	if c.engine == nil {
 		return fmt.Errorf("%s: engine not running", protocol.CodeEngineError)
+	}
+	if cfg, err := c.appCfg.Load(); err == nil {
+		c.appConfig = cfg
 	}
 	if err := c.loadFiltersLocked(ctx, c.engine); err != nil {
 		c.filterErr = err.Error()
@@ -408,6 +491,21 @@ func (c *Controller) Status() statusdto.Status {
 	if port == 0 {
 		port = 53
 	}
+	nwCB, nwRe := netwatch.Stats()
+	desired := "DISABLED"
+	if cfg.Enabled {
+		desired = "ENABLED"
+	}
+	runtime := string(c.state)
+	ownership := "NONE"
+	rec, _ := c.cfgStore.Load()
+	owned := 0
+	if rec != nil {
+		owned = len(rec.Adapters)
+		if owned > 0 {
+			ownership = "OWNED"
+		}
+	}
 	st := statusdto.Status{
 		Service: statusdto.ServiceStatus{
 			Version: AppVersion,
@@ -416,17 +514,34 @@ func (c *Controller) Status() statusdto.Status {
 			Started: c.startedAt,
 		},
 		Engine: statusdto.EngineStatus{
-			State:            string(c.state),
-			ListenerIPv4:     fmt.Sprintf("127.0.0.1:%d", port),
-			ListenerIPv6:     fmt.Sprintf("[::1]:%d", port),
-			Protocol:         cfg.DNS.Protocol,
-			Upstream:         cfg.DNS.Primary,
-			LastError:        c.lastErr,
-			FilteringEnabled: c.state == dnsconfig.StateActive,
+			State:             runtime,
+			ListenerIPv4:      fmt.Sprintf("127.0.0.1:%d", port),
+			ListenerIPv6:      fmt.Sprintf("[::1]:%d", port),
+			Protocol:          cfg.DNS.Protocol,
+			Upstream:          cfg.DNS.Primary,
+			DoHURL:            cfg.DNS.DoHURL,
+			LastError:         c.lastErr,
+			FilteringEnabled:  c.state == dnsconfig.StateActive,
+			ListenerHealthy:   c.listenerHealthy && c.state == dnsconfig.StateActive,
+			NetwatchCallbacks: nwCB,
+			NetwatchReevals:   nwRe,
 		},
 		DNS: statusdto.DNSStatus{
-			State:            string(c.state),
-			RecoveryRequired: c.state == dnsconfig.StateRecoveryRequired || c.state == dnsconfig.StateDegraded,
+			State:                      runtime,
+			DesiredProtection:          desired,
+			RuntimeProtection:          runtime,
+			DnsOwnership:               ownership,
+			ListenerHealth:             c.listenerHealthy,
+			RecoveryRequired:           c.state == dnsconfig.StateRecoveryRequired || c.state == dnsconfig.StateDegraded || owned > 0 && c.state != dnsconfig.StateActive || len(c.suspectedUnproven) > 0,
+			OwnedAdapterCount:          owned,
+			SuspectedUnprovenLocalhost: append([]string(nil), c.suspectedUnproven...),
+			LastHealthFailure:          c.lastHealthFailure,
+			LastHealthFailureAt:        c.lastHealthFailureAt,
+			LastDnsApply:               c.lastDnsApply,
+			LastDnsRestore:             c.lastDnsRestore,
+			LastNetworkChange:          c.lastNetworkChange,
+			LastRecoveryAction:         c.lastRecoveryAction,
+			LastRestoreError:           c.lastRestoreError,
 		},
 		Filters: statusdto.FilterStatus{
 			Loaded:          len(c.listIDs) > 0,
@@ -438,15 +553,14 @@ func (c *Controller) Status() statusdto.Status {
 	stats := c.GetStatsUnlocked()
 	st.Stats = statusdto.StatsStatus{TotalQueries: stats.TotalQueries, BlockedQueries: stats.BlockedQueries}
 
-	rec, _ := c.cfgStore.Load()
 	if rec != nil {
 		for _, o := range rec.Adapters {
-			owned := false
+			ownedFlag := false
 			cat := "unknown"
 			conflict := false
 			if cur, err := c.dns.Snapshot(o.Key); err == nil {
 				if o.MatchesApplied(cur) {
-					owned = true
+					ownedFlag = true
 					cat = "blockads"
 				} else {
 					conflict = true
@@ -457,7 +571,7 @@ func (c *Controller) Status() statusdto.Status {
 			}
 			st.DNS.Adapters = append(st.DNS.Adapters, statusdto.AdapterStatus{
 				StableID: o.Key.GUID, DisplayName: c.names[o.Key.GUID],
-				Eligible: true, Owned: owned, StateCategory: cat, RestoreConflict: conflict,
+				Eligible: true, Owned: ownedFlag, StateCategory: cat, RestoreConflict: conflict,
 			})
 		}
 	}
@@ -477,13 +591,20 @@ func (c *Controller) GetStatsUnlocked() protocol.StatsResult {
 }
 
 // ReevaluateAdapters applies ownership policy after network changes.
+//
+// DNS-1/DNS-2: never ApplyLocalhost unless mayApplyLocalDns authorizes.
+// Never re-snapshot Original. Never drop ownership on temporary absence.
+// Reappearance reconciles against the existing ownership record only.
 func (c *Controller) ReevaluateAdapters(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state != dnsconfig.StateActive {
+	c.lastNetworkChange = time.Now().UTC()
+	if c.state != dnsconfig.StateActive || !c.acceptMut {
 		return nil
 	}
-	// For Phase 3: re-run enable path pieces for new adapters only
+	if err := c.mayApplyLocalDnsLocked(ctx); err != nil {
+		return nil
+	}
 	adapters, err := c.dns.ListAdapters()
 	if err != nil {
 		return err
@@ -493,8 +614,10 @@ func (c *Controller) ReevaluateAdapters(ctx context.Context) error {
 		return err
 	}
 	have := map[string]bool{}
-	for _, o := range st.Adapters {
-		have[o.Key.GUID] = true
+	for i := range st.Adapters {
+		have[st.Adapters[i].Key.GUID] = true
+		st.Adapters[i].LastConfirmedAt = time.Now().UTC()
+		st.Adapters[i].UpdatedAt = st.Adapters[i].LastConfirmedAt
 	}
 	for _, a := range dnsconfig.FilterEligible(adapters) {
 		if have[a.Key.GUID] {
@@ -504,27 +627,22 @@ func (c *Controller) ReevaluateAdapters(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		own := dnsconfig.AdapterOwnership{
-			Key: a.Key, Original: snap, Applied: dnsconfig.LocalhostApplied, UpdatedAt: time.Now().UTC(),
-		}
-		if err := c.dns.ApplyLocalhost(a.Key); err != nil {
+		if !dnsconfig.CanBecomeOriginal(snap) {
 			continue
 		}
+		c.ownershipGeneration++
+		own, err := dnsconfig.BeginOwnership(a.Key, snap, c.session, c.ownershipGeneration)
+		if err != nil {
+			continue
+		}
+		if err := c.applyLocalhostGuardedLocked(ctx, a.Key); err != nil {
+			continue
+		}
+		_ = own.MarkOwned()
+		c.lastDnsApply = time.Now().UTC()
 		st.Adapters = append(st.Adapters, own)
 		c.names[a.Key.GUID] = a.FriendlyName
 	}
-	// Drop missing
-	present := map[string]bool{}
-	for _, a := range adapters {
-		present[a.Key.GUID] = true
-	}
-	kept := st.Adapters[:0]
-	for _, o := range st.Adapters {
-		if present[o.Key.GUID] {
-			kept = append(kept, o)
-		}
-	}
-	st.Adapters = kept
 	st.SavedAt = time.Now().UTC()
 	return c.cfgStore.Save(st)
 }
@@ -572,4 +690,5 @@ func healthCheckLocalDNS(ctx context.Context, port int) error {
 	}
 	return nil
 }
+
 

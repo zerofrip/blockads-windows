@@ -37,6 +37,23 @@ func TestIsEligibleConservative(t *testing.T) {
 	}
 }
 
+func TestMatchesAppliedIPv4Authoritative(t *testing.T) {
+	own := dnsconfig.AdapterOwnership{
+		Applied: dnsconfig.LocalhostApplied,
+	}
+	cur := dnsconfig.AdapterDNSSnapshot{
+		IPv4Servers: dnsconfig.DNSServerList{"127.0.0.1"},
+		IPv6Servers: nil, // API often returns empty IPv6
+	}
+	if !own.MatchesApplied(cur) {
+		t.Fatal("IPv4 localhost ownership must hold when IPv6 snapshot is empty")
+	}
+	cur.IPv4Servers = dnsconfig.DNSServerList{"8.8.8.8"}
+	if own.MatchesApplied(cur) {
+		t.Fatal("external IPv4 must not match")
+	}
+}
+
 func TestCompareAndRestoreOwnership(t *testing.T) {
 	key := dnsconfig.AdapterKey{GUID: "{ETH}"}
 	orig := dnsconfig.AdapterDNSSnapshot{
@@ -138,3 +155,4 @@ func TestStateStoreRoundTrip(t *testing.T) {
 		t.Fatalf("load failed: %v %+v", err, loaded)
 	}
 }
+

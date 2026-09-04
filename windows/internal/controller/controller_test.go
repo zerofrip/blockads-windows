@@ -162,3 +162,66 @@ func TestCrashRecoveryOwnedOnly(t *testing.T) {
 		t.Fatal("recovery failed")
 	}
 }
+
+func TestStartupAppliesDesiredEnable(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{DDDDDDDD-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.30"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	content := fmt.Sprintf(`{
+  "version": 1,
+  "enabled": true,
+  "dns": {"listenPort": 1855, "protocol": "udp", "primary": "1.1.1.1", "fallback": "1.0.0.1"},
+  "filters": {"catalogUrl": "http://127.0.0.1:1/missing.json", "enabledListIds": [], "autoUpdate": false}
+}`)
+	if err := os.WriteFile(paths.ConfigFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := c.Startup(ctx); err != nil {
+		t.Fatalf("startup: %v", err)
+	}
+	st := c.Status()
+	if !st.Engine.FilteringEnabled {
+		t.Fatalf("desired enabled should start filtering: %+v", st)
+	}
+	_ = c.Disable(ctx)
+}
+
+func TestStartupSkipsEnableWhenDesiredDisabled(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{EEEEEEEE-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.31"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1856)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.Status().Engine.FilteringEnabled {
+		t.Fatal("desired disabled must not enable filtering")
+	}
+}
+

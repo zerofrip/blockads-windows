@@ -11,6 +11,12 @@ type MemoryConfigurator struct {
 	Adapters []NetworkAdapter
 	DNS      map[string]AdapterDNSSnapshot // guid → snapshot
 	Fails    map[string]error             // guid → inject error on Apply/Restore
+	// Test-only fault injection (never used in production paths).
+	FailApplyNext     bool
+	FailRestoreNext   bool
+	SilentRestoreNoop bool // API "succeeds" but DNS unchanged
+	ApplyCalls        int
+	RestoreCalls      int
 }
 
 func NewMemoryConfigurator(adapters []NetworkAdapter, initial map[string]AdapterDNSSnapshot) *MemoryConfigurator {
@@ -47,6 +53,11 @@ func (m *MemoryConfigurator) Snapshot(key AdapterKey) (AdapterDNSSnapshot, error
 func (m *MemoryConfigurator) ApplyLocalhost(key AdapterKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.ApplyCalls++
+	if m.FailApplyNext {
+		m.FailApplyNext = false
+		return fmt.Errorf("injected apply failure")
+	}
 	if err, ok := m.Fails[key.GUID]; ok && err != nil {
 		return err
 	}
@@ -64,8 +75,17 @@ func (m *MemoryConfigurator) ApplyLocalhost(key AdapterKey) error {
 func (m *MemoryConfigurator) Restore(key AdapterKey, original AdapterDNSSnapshot) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.RestoreCalls++
+	if m.FailRestoreNext {
+		m.FailRestoreNext = false
+		return fmt.Errorf("injected restore failure")
+	}
 	if err, ok := m.Fails[key.GUID]; ok && err != nil {
 		return err
+	}
+	if m.SilentRestoreNoop {
+		// Simulate SetInterfaceDnsSettings returning success without changing DNS.
+		return nil
 	}
 	cp := original
 	cp.Key = key
@@ -85,4 +105,27 @@ func (m *MemoryConfigurator) SetCurrent(key AdapterKey, snap AdapterDNSSnapshot)
 	snap.Key = key
 	FillChecksum(&snap)
 	m.DNS[key.GUID] = snap
+}
+
+// RemoveAdapter simulates adapter disappearance (network flap).
+func (m *MemoryConfigurator) RemoveAdapter(guid string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.Adapters[:0]
+	for _, a := range m.Adapters {
+		if a.Key.GUID != guid {
+			out = append(out, a)
+		}
+	}
+	m.Adapters = out
+}
+
+// AddAdapter simulates adapter (re)appearance.
+func (m *MemoryConfigurator) AddAdapter(a NetworkAdapter, snap AdapterDNSSnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Adapters = append(m.Adapters, a)
+	snap.Key = a.Key
+	FillChecksum(&snap)
+	m.DNS[a.Key.GUID] = snap
 }

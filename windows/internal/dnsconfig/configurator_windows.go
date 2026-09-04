@@ -219,12 +219,16 @@ func (w *winConfigurator) setNameServers(guid windows.GUID, servers DNSServerLis
 	if ipv6 {
 		settings.Flags |= dnsSettingIPv6
 	}
-	joined := joinServers(servers)
-	p, err := windows.UTF16PtrFromString(joined)
-	if err != nil {
-		return err
+	if len(servers) == 0 {
+		// NULL NameServer with DNS_SETTING_NAMESERVER returns the interface to DHCP.
+		settings.NameServer = nil
+	} else {
+		p, err := windows.UTF16PtrFromString(joinServers(servers))
+		if err != nil {
+			return err
+		}
+		settings.NameServer = p
 	}
-	settings.NameServer = p
 	r1, _, _ := procSetInterfaceDnsSettings.Call(
 		uintptr(unsafe.Pointer(&guid)),
 		uintptr(unsafe.Pointer(&settings)),
@@ -276,4 +280,5 @@ func (w *winConfigurator) Status() (string, error) {
 	elig := FilterEligible(ads)
 	return fmt.Sprintf("platform=windows adapters=%d eligible=%d api=Get/SetInterfaceDnsSettings minBuild=19041", len(ads), len(elig)), nil
 }
+
 

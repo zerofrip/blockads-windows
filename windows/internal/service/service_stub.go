@@ -19,7 +19,7 @@ func Run(paths controller.Paths) error {
 		return err
 	}
 	defer ctrl.Close()
-	_, _ = ctrl.Recover(context.Background())
+	_ = ctrl.Startup(context.Background())
 	ln, err := ipc.ListenPipe("")
 	if err != nil {
 		return err
@@ -35,3 +35,4 @@ func Run(paths controller.Paths) error {
 func InstallHints() string {
 	return "Windows Service installation is only available on Windows."
 }
+

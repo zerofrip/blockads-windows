@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,8 @@ func (s *Store) Load() (Config, error) {
 		}
 		return Config{}, err
 	}
+	// Windows PowerShell Set-Content -Encoding utf8 writes a BOM; strip it.
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 	var cfg Config
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("corrupt config (refusing destructive defaults apply): %w", err)
@@ -127,3 +130,4 @@ func (s *Store) Save(cfg Config) error {
 	}
 	return os.Rename(tmp, s.Path)
 }
+

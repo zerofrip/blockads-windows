@@ -47,3 +47,25 @@ func TestMissingConfigReturnsDefaults(t *testing.T) {
 		t.Fatalf("%+v", cfg)
 	}
 }
+
+func TestLoadStripsUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := []byte("\xef\xbb\xbf" + `{
+  "version": 1,
+  "enabled": false,
+  "dns": {"listenPort": 53, "protocol": "doh", "primary": "1.1.1.1", "fallback": "203.0.113.50", "dohUrl": "https://cloudflare-dns.com/dns-query"},
+  "filters": {"catalogUrl": "http://127.0.0.1/cat.json", "autoUpdate": false}
+}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&Store{Path: path}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DNS.Protocol != "doh" || got.DNS.DoHURL == "" {
+		t.Fatalf("BOM config not loaded: %+v", got.DNS)
+	}
+}
+

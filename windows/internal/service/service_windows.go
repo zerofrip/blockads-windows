@@ -34,7 +34,7 @@ func (s *blockAdsService) Execute(args []string, r <-chan svc.ChangeRequest, cha
 	}
 	defer ctrl.Close()
 
-	_, _ = ctrl.Recover(ctx)
+	_ = ctrl.Startup(ctx)
 
 	ln, err := ipc.ListenPipe("")
 	if err != nil {
@@ -92,3 +92,4 @@ func InstallHints() string {
 	exe, _ := filepath.Abs("BlockAdsService.exe")
 	return "Use: blockads-service install|uninstall|start|stop|status\nDefault exe: " + exe
 }
+
