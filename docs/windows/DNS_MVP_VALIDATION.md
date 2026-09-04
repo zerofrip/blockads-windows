@@ -1,6 +1,6 @@
 # DNS MVP Validation
 
-**Status:** Template — fill with experimental results during Phase 2.
+**Status:** Phase 3 complete for non-destructive paths. System DNS mutation items: PENDING_DEDICATED_WINDOWS_VALIDATION.
 
 Environment under test: (OS build, adapters, IPv6 yes/no)
 

@@ -9,8 +9,8 @@
 | StartStandalone DNS | Root Proxy | Phase 2 core | IMPLEMENTED | Controller wraps StartStandalone |
 | DnsConfigurator | VpnService DNS | Native IP Helper | IMPLEMENTED | Get/SetInterfaceDnsSettings; runtime UNVERIFIED |
 | Adapter policy | UID/app bypass | Eligibility policy | IMPLEMENTED | Ethernet/Wi-Fi conservative |
-| blockads-cli | N/A | CLI | IMPLEMENTED | enable/disable/status/recover/test-dns |
-| Windows Service | Foreground svc | SCM service | IN_PROGRESS | svc + Named Pipe IPC skeleton |
+| blockads-cli | N/A | CLI | IMPLEMENTED | production IPC client; --dev-direct explicit |
+| Windows Service | Foreground svc | SCM service | IMPLEMENTED | SCM install/start/stop; runtime PENDING_DEDICATED |
 | Desktop UI | Compose | WPF | NOT_STARTED | Phase 4 |
 | Process identity | UID/package | PID/path | NOT_STARTED | Phase 5 |
 | Packet tunnel | VpnService TUN | Wintun candidate | NOT_STARTED | Phase 6 — not locked |
@@ -20,3 +20,8 @@
 | Windows CI | ubuntu Android | windows-latest Go | IMPLEMENTED | windows-go.yml |
 
 Status values: `NOT_STARTED` | `IN_PROGRESS` | `IMPLEMENTED` | `TESTED` | `BLOCKED` | `NOT_APPLICABLE`
+
+| IPC protocol v1 | N/A | Named Pipe | IMPLEMENTED | docs/windows/IPC_PROTOCOL.md |
+| Service config schema | DataStore | PROGRAMDATA JSON | IMPLEMENTED | versioned atomic writes |
+| Filter download pipeline | FilterDownloadManager | Go filters.Manager | IMPLEMENTED | transactional ReplaceTriesAtomic |
+| Network change watch | NetworkMonitor | NotifyIpInterfaceChange | IMPLEMENTED | debounce + ReevaluateAdapters |
