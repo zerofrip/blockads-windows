@@ -7,11 +7,11 @@
 | Trie/Bloom load | Yes | Same files | TESTED | mapped_file_test |
 | Custom rules (Go) | Kotlin DomainChecker | Pure Go | IMPLEMENTED | Android still uses Kotlin |
 | StartStandalone DNS | Root Proxy | Phase 2 core | IMPLEMENTED | Controller wraps StartStandalone |
-| DnsConfigurator | VpnService DNS | Native IP Helper | IMPLEMENTED | Get/SetInterfaceDnsSettings; runtime UNVERIFIED |
-| Adapter policy | UID/app bypass | Eligibility policy | IMPLEMENTED | Ethernet/Wi-Fi conservative |
-| blockads-cli | N/A | CLI | IMPLEMENTED | production IPC client; --dev-direct explicit |
-| Windows Service | Foreground svc | SCM service | IMPLEMENTED | SCM install/start/stop; runtime PENDING_DEDICATED |
-| Desktop UI | Compose | WPF | NOT_STARTED | Phase 4 |
+| DnsConfigurator | VpnService DNS | Native IP Helper | TESTED | Get/SetInterfaceDnsSettings; VM-validated |
+| Adapter policy | UID/app bypass | Eligibility policy | TESTED | Ethernet/Wi-Fi + Hyper-V guest NIC |
+| blockads-cli | N/A | CLI | TESTED | production IPC client; --dev-direct explicit |
+| Windows Service | Foreground svc | SCM service | TESTED | SCM install/start/stop; VM-validated |
+| Desktop UI | Compose | WPF | IMPLEMENTED | Phase 4 — docs/windows/PHASE4_WPF.md |
 | Process identity | UID/package | PID/path | NOT_STARTED | Phase 5 |
 | Packet tunnel | VpnService TUN | Wintun candidate | NOT_STARTED | Phase 6 — not locked |
 | HTTPS MITM | Yes | Cert store | NOT_STARTED | Phase 7 |
@@ -25,3 +25,4 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `IMPLEMENTED` | `TESTED` | `BLOCK
 | Service config schema | DataStore | PROGRAMDATA JSON | IMPLEMENTED | versioned atomic writes |
 | Filter download pipeline | FilterDownloadManager | Go filters.Manager | IMPLEMENTED | transactional ReplaceTriesAtomic |
 | Network change watch | NetworkMonitor | NotifyIpInterfaceChange | IMPLEMENTED | debounce + ReevaluateAdapters |
+
