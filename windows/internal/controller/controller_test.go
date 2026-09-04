@@ -285,3 +285,160 @@ func TestStartupSkipsEnableWhenDesiredDisabled(t *testing.T) {
 }
 
 
+
+func TestEnableWhileActiveAndOwned(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{A1111111-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.50"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1861)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if err := c.Enable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Enable(ctx); err != nil {
+		t.Fatalf("idempotent enable: %v", err)
+	}
+	st := c.Status()
+	if !st.Engine.FilteringEnabled || st.DNS.DnsOwnership != "OWNED" {
+		t.Fatalf("%+v", st)
+	}
+	cur, _ := mem.Snapshot(key)
+	if !dnsconfig.EqualServers(cur.IPv4Servers, dnsconfig.LocalhostApplied.IPv4Servers) {
+		t.Fatalf("dns=%v", cur.IPv4Servers)
+	}
+	_ = c.Disable(ctx)
+}
+
+func TestEnableWhileActiveButDnsExternallyChanged(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{A2222222-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.51"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1862)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if err := c.Enable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mem.SetCurrent(key, dnsconfig.AdapterDNSSnapshot{
+		Key: key, IPv4Servers: dnsconfig.DNSServerList{"8.8.8.8"},
+	})
+	err = c.Enable(ctx)
+	if err == nil {
+		t.Fatal("expected conflict after external DNS change")
+	}
+	cur, _ := mem.Snapshot(key)
+	if cur.IPv4Servers[0] != "8.8.8.8" {
+		t.Fatalf("external DNS overwritten: %v", cur.IPv4Servers)
+	}
+	st := c.Status()
+	if st.Engine.State != string(dnsconfig.StateDegraded) {
+		t.Fatalf("want DEGRADED got %+v", st)
+	}
+	if st.DNS.DnsOwnership == "OWNED" {
+		t.Fatal("ownership should be cleared")
+	}
+}
+
+func TestEnableWhileActiveOwnershipMissing(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{A3333333-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1", "8.8.8.8"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.52"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1863)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if err := c.Enable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate emergency-restore / journal clear while engine still ACTIVE.
+	store := dnsconfig.NewStateStore(paths.StateFile)
+	_ = store.Clear()
+	mem.SetCurrent(key, orig)
+	if err := c.Enable(ctx); err != nil {
+		t.Fatalf("reacquire: %v", err)
+	}
+	st := c.Status()
+	if !st.Engine.FilteringEnabled || st.DNS.DnsOwnership != "OWNED" {
+		t.Fatalf("%+v", st)
+	}
+	cur, _ := mem.Snapshot(key)
+	if !dnsconfig.EqualServers(cur.IPv4Servers, dnsconfig.LocalhostApplied.IPv4Servers) {
+		t.Fatalf("dns=%v", cur.IPv4Servers)
+	}
+	_ = c.Disable(ctx)
+}
+
+func TestEnableWhileActiveRecoveryRequired(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{A4444444-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1"}}
+	dnsconfig.FillChecksum(&orig)
+	mem := dnsconfig.NewMemoryConfigurator([]dnsconfig.NetworkAdapter{{
+		Key: key, FriendlyName: "Ethernet", Description: "Realtek",
+		IfType: dnsconfig.IfTypeEthernetCSMACD, OperStatus: dnsconfig.OperStatusUp,
+		IPv4Addrs: []string{"192.168.1.53"},
+	}}, map[string]dnsconfig.AdapterDNSSnapshot{key.GUID: orig})
+
+	paths := testPaths(t)
+	writeHighPortConfig(t, paths.ConfigFile, 1864)
+	c, err := controller.New(paths, mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	if err := c.Enable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := dnsconfig.NewStateStore(paths.StateFile)
+	_ = store.Clear()
+	// Orphan localhost without provenance — must not invent Original.
+	mem.SetCurrent(key, dnsconfig.AdapterDNSSnapshot{
+		Key: key, IPv4Servers: dnsconfig.LocalhostApplied.IPv4Servers,
+		IPv6Servers: dnsconfig.LocalhostApplied.IPv6Servers,
+	})
+	err = c.Enable(ctx)
+	if err == nil {
+		t.Fatal("expected recovery-required for unproven localhost")
+	}
+	st := c.Status()
+	if st.Engine.State != string(dnsconfig.StateRecoveryRequired) && !st.DNS.RecoveryRequired {
+		t.Fatalf("want RECOVERY_REQUIRED got %+v", st)
+	}
+	cur, _ := mem.Snapshot(key)
+	if !dnsconfig.LooksLikeBlockAdsLocalhost(cur) {
+		t.Fatalf("must not mutate unproven localhost: %v", cur.IPv4Servers)
+	}
+}

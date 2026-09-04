@@ -175,7 +175,8 @@ func (c *Controller) Enable(ctx context.Context) error {
 		return errors.New("service is stopping")
 	}
 	if c.state == dnsconfig.StateActive {
-		return nil
+		// Desired-protection idempotent, but DNS ownership must be reconciled.
+		return c.reconcileActiveLocked(ctx)
 	}
 	if cfg, err := c.appCfg.Load(); err == nil {
 		c.appConfig = cfg
@@ -351,6 +352,174 @@ func (c *Controller) persistEnabledLocked(enabled bool) error {
 	cfg.Enabled = enabled
 	c.appConfig = cfg
 	return c.appCfg.Save(cfg)
+}
+
+// reconcileActiveLocked runs when Enable is invoked while already ACTIVE.
+// It never blindly overwrites externally changed DNS. Missing ownership may be
+// reacquired only when current DNS is a trustworthy Original candidate.
+func (c *Controller) reconcileActiveLocked(ctx context.Context) error {
+	if err := c.mayApplyLocalDnsLocked(ctx); err != nil {
+		c.listenerHealthy = false
+		c.lastHealthFailure = err.Error()
+		c.lastHealthFailureAt = time.Now().UTC()
+		c.lastErr = err.Error()
+		return fmt.Errorf("%s: %v", protocol.CodeEngineError, err)
+	}
+	c.listenerHealthy = true
+
+	st, err := c.cfgStore.Load()
+	if err != nil {
+		return err
+	}
+	if st == nil {
+		st = &dnsconfig.RecoveryState{
+			Version: dnsconfig.RecoveryStateVersion, PolicyVersion: dnsconfig.AdapterPolicyVersion,
+			SessionID: c.session, Controller: dnsconfig.StateActive,
+			ListenAddr: "127.0.0.1", ListenPort: c.listenPortLocked(),
+			Dirty: true, SavedAt: time.Now().UTC(),
+		}
+	}
+	if c.session == "" {
+		c.session = st.SessionID
+	}
+	if c.session == "" {
+		c.session = newSessionID()
+		st.SessionID = c.session
+	}
+
+	externalConflict := false
+	blockedReacquire := map[string]bool{}
+	remaining := make([]dnsconfig.AdapterOwnership, 0, len(st.Adapters))
+	ownedOK := 0
+	for i := range st.Adapters {
+		own := st.Adapters[i]
+		cur, snapErr := c.dns.Snapshot(own.Key)
+		if snapErr != nil {
+			remaining = append(remaining, own)
+			continue
+		}
+		if own.MatchesApplied(cur) {
+			remaining = append(remaining, own)
+			ownedOK++
+			continue
+		}
+		// Externally modified — drop ownership; never overwrite / reacquire this adapter.
+		externalConflict = true
+		blockedReacquire[own.Key.GUID] = true
+		c.lastRecoveryAction = "enable_reconcile_external_dns"
+	}
+	st.Adapters = remaining
+	st.SavedAt = time.Now().UTC()
+	st.Dirty = len(remaining) > 0
+	if len(remaining) == 0 {
+		_ = c.cfgStore.Clear()
+	} else if err := c.cfgStore.Save(st); err != nil {
+		return err
+	}
+
+	have := map[string]bool{}
+	for _, o := range remaining {
+		have[o.Key.GUID] = true
+	}
+
+	adapters, err := c.dns.ListAdapters()
+	if err != nil {
+		return err
+	}
+	reacquired := 0
+	for _, a := range dnsconfig.FilterEligible(adapters) {
+		if have[a.Key.GUID] || blockedReacquire[a.Key.GUID] {
+			continue
+		}
+		snap, snapErr := c.dns.Snapshot(a.Key)
+		if snapErr != nil {
+			continue
+		}
+		snap.FriendlyName = a.FriendlyName
+		c.names[a.Key.GUID] = a.FriendlyName
+		if !dnsconfig.CanBecomeOriginal(snap) {
+			if dnsconfig.LooksLikeBlockAdsLocalhost(snap) || dnsconfig.LooksLikeLocalhostDNS(snap) {
+				c.scanUnprovenLocalhostLocked()
+				c.state = dnsconfig.StateRecoveryRequired
+				c.lastErr = fmt.Sprintf("adapter %s has localhost DNS without ownership provenance", a.Key.GUID)
+				c.lastRecoveryAction = "enable_reconcile_unproven_localhost"
+				return fmt.Errorf("%s: %s", protocol.CodeConflict, c.lastErr)
+			}
+			continue
+		}
+		c.ownershipGeneration++
+		own, beginErr := dnsconfig.BeginOwnership(a.Key, snap, c.session, c.ownershipGeneration)
+		if beginErr != nil {
+			continue
+		}
+		st.Adapters = append(append([]dnsconfig.AdapterOwnership{}, st.Adapters...), own)
+		st.SessionID = c.session
+		st.Controller = dnsconfig.StateActive
+		st.Dirty = true
+		st.SavedAt = time.Now().UTC()
+		if st.ListenPort == 0 {
+			st.ListenPort = c.listenPortLocked()
+			st.ListenAddr = "127.0.0.1"
+		}
+		if err := c.cfgStore.Save(st); err != nil {
+			return err
+		}
+		if err := c.applyLocalhostGuardedLocked(ctx, a.Key); err != nil {
+			own.MarkRecoveryRequired()
+			c.state = dnsconfig.StateRecoveryRequired
+			c.lastErr = err.Error()
+			return fmt.Errorf("%s: %v", protocol.CodeDNSError, err)
+		}
+		if err := own.MarkOwned(); err != nil {
+			return err
+		}
+		st.Adapters[len(st.Adapters)-1] = own
+		_ = c.cfgStore.Save(st)
+		c.lastDnsApply = time.Now().UTC()
+		c.lastRecoveryAction = "enable_reconcile_reacquire"
+		have[a.Key.GUID] = true
+		reacquired++
+	}
+
+	if ownedOK+reacquired > 0 {
+		c.state = dnsconfig.StateActive
+		c.appConfig.Enabled = true
+		_ = c.persistEnabledLocked(true)
+		if c.watchdogStop == nil {
+			c.startWatchdogLocked()
+		}
+		return nil
+	}
+
+	if externalConflict {
+		// Match watchdog degraded semantics: release protection runtime, keep desired enabled.
+		c.stopWatchdogLocked()
+		if c.engine != nil {
+			c.engine.Stop()
+			c.engine = nil
+		}
+		c.session = ""
+		c.listenerHealthy = false
+		c.state = dnsconfig.StateDegraded
+		c.lastErr = "DNS ownership lost: adapter DNS was modified externally; auto-reapply forbidden"
+		c.lastRecoveryAction = "enable_reconcile_external_dns"
+		_ = c.persistEnabledLocked(true)
+		return fmt.Errorf("%s: %s", protocol.CodeConflict, c.lastErr)
+	}
+
+	// ACTIVE with no ownership and nothing to reacquire — treat as inconsistent.
+	c.state = dnsconfig.StateRecoveryRequired
+	c.lastErr = "ACTIVE runtime without DNS ownership; reconciliation could not reacquire adapters"
+	c.lastRecoveryAction = "enable_reconcile_missing_ownership"
+	return fmt.Errorf("%s: %s", protocol.CodeConflict, c.lastErr)
+}
+
+func (c *Controller) listenPortLocked() int {
+	port := c.appConfig.DNS.ListenPort
+	if port == 0 {
+		return 53
+	}
+	return port
 }
 
 func (c *Controller) loadFiltersLocked(ctx context.Context, engine *tunnel.Engine) error {
@@ -704,6 +873,7 @@ func healthCheckLocalDNS(ctx context.Context, port int) error {
 	}
 	return nil
 }
+
 
 
 
