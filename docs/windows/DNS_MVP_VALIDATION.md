@@ -1,45 +1,46 @@
 # DNS MVP Validation
 
-**Status:** Phase 3 complete for non-destructive paths. System DNS mutation items: PENDING_DEDICATED_WINDOWS_VALIDATION.
+**Status:** Phase 3 runtime validation executed on Windows 11 build 26200 (see `PHASE3_RUNTIME_VALIDATION.md`). System DNS mutation paths verified with compare-and-restore; DoH traffic inspection and reboot persistence remain open.
 
-Environment under test: (OS build, adapters, IPv6 yes/no)
+Environment under test: Windows 11 Pro 10.0.26200 x64; Go 1.27.0; branch `windows`.
 
 ## Listener
 
 | Check | Result | Notes |
 |-------|--------|-------|
-| Bind `127.0.0.1:53` UDP/TCP | UNVERIFIED_WINDOWS_RUNTIME | |
-| Bind `[::1]:53` when IPv6 present | UNVERIFIED_WINDOWS_RUNTIME | |
-| Port 53 occupied → fail safe + report owner | UNVERIFIED_WINDOWS_RUNTIME | Must not kill peer |
+| Bind `127.0.0.1:53` UDP/TCP | PASS | Via enable path after port free |
+| Bind `[::1]:53` when IPv6 present | UNVERIFIED | Listener claimed in status; dedicated bind conflict not run |
+| Port 53 occupied → fail safe + report owner | PASS | Enable failed; DNS unchanged |
 
 ## Resolution paths
 
 | Check | Result | Notes |
 |-------|--------|-------|
-| `nslookup` blocked domain | UNVERIFIED_WINDOWS_RUNTIME | |
-| `nslookup` allowed domain | UNVERIFIED_WINDOWS_RUNTIME | |
-| `Resolve-DnsName` | UNVERIFIED_WINDOWS_RUNTIME | |
-| Win32 `DnsQuery_W` / ordinary apps | UNVERIFIED_WINDOWS_RUNTIME | |
-| Browser resolution | UNVERIFIED_WINDOWS_RUNTIME | Manual |
-| IPv4-only adapter | UNVERIFIED_WINDOWS_RUNTIME | |
-| Dual-stack adapter | UNVERIFIED_WINDOWS_RUNTIME | |
-| Multiple active eligible adapters | UNVERIFIED_WINDOWS_RUNTIME | |
+| `nslookup` blocked domain | PASS | `doubleclick.net` → `0.0.0.0` via 127.0.0.1 |
+| `nslookup` allowed domain | PASS | `example.com` |
+| `Resolve-DnsName` | PASS | Allow + sinkhole |
+| Win32 `DnsQuery_W` / ordinary apps | PASS | System resolver via interface DNS |
+| Browser resolution | UNVERIFIED | Manual |
+| IPv4-only adapter | PASS | Ethernet |
+| Dual-stack adapter | PARTIAL | AAAA observed via nslookup |
+| Multiple active eligible adapters | N/A | Only Ethernet eligible/up |
 
 ## Safety
 
 | Check | Result | Notes |
 |-------|--------|-------|
-| Disable compare-and-restore | UNVERIFIED_WINDOWS_RUNTIME | |
-| External DNS change not overwritten | UNVERIFIED_WINDOWS_RUNTIME | |
-| Crash recovery ownership | UNVERIFIED_WINDOWS_RUNTIME | |
-| Adapter appear/remove | UNVERIFIED_WINDOWS_RUNTIME | |
+| Disable compare-and-restore | PASS | DHCP/empty NameServer restored to `192.168.1.1` |
+| External DNS change not overwritten | PASS | Kept `1.1.1.1`; DEGRADED/conflict |
+| Crash recovery ownership | PASS | Restart Recover restored owned localhost DNS |
+| Adapter appear/remove | UNVERIFIED | Gate L follow-up |
 
 ## Network change mechanism selected
 
-Phase 2 MVP: recovery/ownership is per adapter GUID; enable/disable and `recover` re-enumerate adapters via `GetAdaptersAddresses`.
+Phase 3: `NotifyIpInterfaceChange` + debounce in `netwatch` (runtime flap counts: not measured this session).
 
-Planned (Phase 3+): `NotifyIpInterfaceChange` (or equivalent) to trigger controlled re-evaluation without aggressive polling. Controller surface already keys state by stable GUID/LUID so appear/disappear does not require redesign.
+## Known insufficient configurations / bugs fixed in validation
 
-## Known insufficient configurations
+- **BUG:** `GetInterfaceDnsSettings` used `IP_ADAPTER_ADDRESSES.NetworkGuid` (network profile) instead of `AdapterName` (interface GUID). Fixed to use `AdapterName`.
+- **BUG:** Windows mmap prevented delete/rename of mapped filter files; filter pipeline moved to versioned immutable files + `CloseFilters`.
+- DoH upstream not proven by traffic capture this session (UDP upstream configured).
 
-Document any case where setting interface DNS to `127.0.0.1` / `::1` does **not** send queries to `StartStandalone` (NRPT override, MDM, DoH hard-coded apps, etc.).
