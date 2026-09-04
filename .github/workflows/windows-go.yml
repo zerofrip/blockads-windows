@@ -1,0 +1,47 @@
+name: Windows Go Core
+
+on:
+  push:
+    branches: [main, windows]
+  pull_request:
+    branches: [main, windows]
+
+concurrency:
+  group: windows-go-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-core:
+    name: Go tunnel on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        working-directory: tunnel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.5'
+          cache: true
+          cache-dependency-path: tunnel/go.sum
+
+      - name: Go test
+        run: go test ./... -count=1
+
+      - name: Go build
+        run: go build -o ../build/blockads-tunnel${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
+
+      - name: Cross-compile Windows from Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          GOOS=windows GOARCH=amd64 go build -o ../build/blockads-tunnel-windows-amd64.exe .
+          GOOS=windows GOARCH=amd64 go test -c -o ../build/tunnel-windows.test.exe .

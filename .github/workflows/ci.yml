@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows]
   pull_request:
-    branches: [main]
+    branches: [main, windows]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -90,3 +90,4 @@ jobs:
           name: BlockAds-universal-debug
           path: app/build/outputs/apk/debug/*universal*.apk
           retention-days: 7
+
