@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/nqmgaming/blockads-windows/windows/internal/controller"
+	"github.com/nqmgaming/blockads-windows/windows/internal/dnsconfig"
 	"github.com/nqmgaming/blockads-windows/windows/internal/service"
 )
 
@@ -46,12 +47,22 @@ func main() {
 			fatal(err)
 		}
 		fmt.Println(st)
+	case "emergency-restore":
+		opts := controller.EmergencyOptions{}
+		for _, a := range os.Args[2:] {
+			if a == "--force-unproven-localhost" {
+				opts.ForceUnprovenLocalhost = true
+			}
+		}
+		if err := controller.PrintEmergencyRestore(defaultPaths(), dnsconfig.NewPlatformConfigurator(), opts); err != nil {
+			fatal(err)
+		}
 	case "install-hints":
 		fmt.Print(service.InstallHints())
 	case "run":
 		runService()
 	default:
-		fmt.Fprintf(os.Stderr, "usage: blockads-service [install|uninstall|start|stop|status|run]\n")
+		fmt.Fprintf(os.Stderr, "usage: blockads-service [install|uninstall|start|stop|status|emergency-restore [--force-unproven-localhost]|run]\n")
 		os.Exit(2)
 	}
 }
@@ -83,3 +94,4 @@ func defaultPaths() controller.Paths {
 		FilterDir:  filepath.Join(base, "filters"),
 	}
 }
+
