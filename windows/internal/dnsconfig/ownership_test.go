@@ -107,3 +107,33 @@ func TestMatchesRestoredSemanticDHCP(t *testing.T) {
 		t.Fatal("localhost must not match restored DHCP")
 	}
 }
+
+func TestReconcileRetainsOwnershipWhenAdapterMissing(t *testing.T) {
+	key := dnsconfig.AdapterKey{GUID: "{MISSING-BBBB-CCCC-DDDD-EEEEEEEEEEEE}"}
+	orig := dnsconfig.AdapterDNSSnapshot{Key: key, IPv4Servers: dnsconfig.DNSServerList{"1.1.1.1", "8.8.8.8"}}
+	dnsconfig.FillChecksum(&orig)
+	own, err := dnsconfig.BeginOwnership(key, orig, "s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = own.MarkOwned()
+	// Empty adapter list simulates reboot with NIC admin-down.
+	mem := dnsconfig.NewMemoryConfigurator(nil, map[string]dnsconfig.AdapterDNSSnapshot{
+		key.GUID: {Key: key, IPv4Servers: dnsconfig.DNSServerList{"127.0.0.1"}},
+	})
+	st := &dnsconfig.RecoveryState{Adapters: []dnsconfig.AdapterOwnership{own}, Dirty: true}
+	results, err := dnsconfig.ReconcileRecovery(mem, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Decision != dnsconfig.RestoreMissing {
+		t.Fatalf("results=%+v", results)
+	}
+	if len(st.Adapters) != 1 {
+		t.Fatal("must retain ownership when adapter missing")
+	}
+	if !dnsconfig.EqualServers(st.Adapters[0].Original.IPv4Servers, orig.IPv4Servers) {
+		t.Fatalf("Original lost: %+v", st.Adapters[0].Original)
+	}
+}
+

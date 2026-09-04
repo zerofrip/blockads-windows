@@ -1,6 +1,9 @@
 package dnsconfig
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // LooksLikeBlockAdsLocalhost reports whether the snapshot still points at
 // BlockAds-controlled IPv4 localhost DNS (DNS-1 orphan detector).
@@ -92,9 +95,18 @@ func ReconcileRecovery(cfg DnsConfigurator, st *RecoveryState) ([]RestoreResult,
 		_ = own.MarkRestoring()
 		a, ok := present[own.Key.GUID]
 		if !ok {
-			r := CompareAndRestore(cfg, own, AdapterDNSSnapshot{}, false)
-			results = append(results, r)
-			// Missing adapter: drop ownership only for RestoreMissing (nothing to recover on NIC).
+			// Adapter temporarily absent (reboot with NIC still admin-down, Gate L flap).
+			// MUST retain ownership/Original — dropping it recreates the 2026-09-04 incident.
+			own.Phase = OwnershipOwned
+			if own.Provenance == "" {
+				own.Provenance = ProvenanceOwned
+			}
+			own.UpdatedAt = time.Now().UTC()
+			results = append(results, RestoreResult{
+				Key: own.Key, Decision: RestoreMissing,
+				Detail: "adapter absent; retaining ownership provenance (DNS-2)",
+			})
+			remaining = append(remaining, own)
 			continue
 		}
 		snap, err := cfg.Snapshot(a.Key)
@@ -110,7 +122,7 @@ func ReconcileRecovery(cfg DnsConfigurator, st *RecoveryState) ([]RestoreResult,
 		case RestoreApplied:
 			// verified — drop provenance
 		case RestoreMissing:
-			// nothing
+			remaining = append(remaining, own)
 		case RestoreSkipped:
 			// external change wins; release ownership without mutation
 		case RestoreFailed:
@@ -129,3 +141,4 @@ func ReconcileRecovery(cfg DnsConfigurator, st *RecoveryState) ([]RestoreResult,
 	}
 	return results, nil
 }
+
