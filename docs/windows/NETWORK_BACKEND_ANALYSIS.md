@@ -31,9 +31,9 @@
 | API | Minimum |
 |-----|---------|
 | `GetAdaptersAddresses` | Vista+ |
-| `GetInterfaceDnsSettings` / `SetInterfaceDnsSettings` | **Windows 10 1809+** (RS5) / Server 2019+ |
+| `GetInterfaceDnsSettings` / `SetInterfaceDnsSettings` | **Windows 10 Build 19041+** (2004 / 20H1) |
 
-Windows 10 builds older than 1809 need a documented compatibility backend (IP Helper DNS via registry/`DnsQueryConfig` era APIs or fail with clear unsupported message). Primary target Win11 / secondary Win10 x64 assumes 1809+.
+Windows 10 builds older than 19041 get a documented `ErrNotSupported` from the platform configurator (no silent fallback to `netsh`). Primary target Win11 / secondary Win10 x64 assumes 19041+.
 
 ### 2. Wintun + existing gVisor/tun2socks path
 
@@ -105,3 +105,4 @@ Phase 6: re-evaluate Wintun vs WinDivert vs user-mode WFP
 - No WinDivert/Wintun packaging
 - No packet tunnelling
 - No shell-based DNS configuration in production
+
