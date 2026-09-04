@@ -3,9 +3,9 @@
 | Component | Android | Windows | Status | Notes |
 |-----------|---------|---------|--------|-------|
 | Architecture audit docs | N/A | docs/windows/* | IMPLEMENTED | Phase 0 |
-| Portable mmap | unix mmap | windows MapView | NOT_STARTED | Phase 1 P1 |
-| Trie/Bloom load | Yes | Same files | NOT_STARTED | Depends on mmap |
-| Custom rules (Go) | Kotlin DomainChecker | Pure Go | NOT_STARTED | After characterization |
+| Portable mmap | unix mmap | windows MapView | TESTED | Phase 1 done |
+| Trie/Bloom load | Yes | Same files | TESTED | mapped_file_test |
+| Custom rules (Go) | Kotlin DomainChecker | Pure Go | IMPLEMENTED | Android still uses Kotlin |
 | StartStandalone DNS | Root Proxy | Phase 2 core | NOT_STARTED | Reuse as-is |
 | DnsConfigurator | VpnService DNS | Native IP Helper | NOT_STARTED | Compare-and-restore |
 | Adapter policy | UID/app bypass | Eligibility policy | NOT_STARTED | DNS_ADAPTER_POLICY |
@@ -17,6 +17,6 @@
 | HTTPS MITM | Yes | Cert store | NOT_STARTED | Phase 7 |
 | WireGuard | Yes | Isolated | NOT_STARTED | Phase 8 |
 | Installer | APK | MSI (WiX) | NOT_STARTED | Phase 9 |
-| Windows CI | ubuntu Android | windows-latest Go | NOT_STARTED | Phase 1 |
+| Windows CI | ubuntu Android | windows-latest Go | IMPLEMENTED | windows-go.yml |
 
 Status values: `NOT_STARTED` | `IN_PROGRESS` | `IMPLEMENTED` | `TESTED` | `BLOCKED` | `NOT_APPLICABLE`
