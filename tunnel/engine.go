@@ -301,6 +301,130 @@ func (e *Engine) SetTries(adTriePathsCsv, secTriePathsCsv, adBloomPathsCsv, secB
 
 // SetFirewallChecker sets the Kotlin-side firewall checker.
 // This is called before Start() to enable per-app DNS blocking.
+// ReplaceTriesAtomic loads all trie/bloom paths first. Only if every non-empty
+// path succeeds does it swap into the engine and close previous mappings.
+// On failure the previous filter set remains active. gomobile-compatible.
+// Prefer this for runtime reload; SetTries remains best-effort for Android.
+func (e *Engine) ReplaceTriesAtomic(adTriePathsCsv, secTriePathsCsv, adBloomPathsCsv, secBloomPathsCsv string) error {
+	type loadedTrie struct {
+		t  *MmapTrie
+		id string
+	}
+	loadTries := func(csv string) ([]loadedTrie, error) {
+		var out []loadedTrie
+		for _, path := range strings.Split(csv, ",") {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			t, err := LoadMmapTrie(path)
+			if err != nil {
+				for _, x := range out {
+					x.t.Close()
+				}
+				return nil, fmt.Errorf("trie %s: %w", path, err)
+			}
+			id := strings.TrimSuffix(filepath.Base(path), ".trie")
+			out = append(out, loadedTrie{t: t, id: id})
+		}
+		return out, nil
+	}
+	loadBlooms := func(csv string) ([]*BloomFilter, error) {
+		var out []*BloomFilter
+		for _, path := range strings.Split(csv, ",") {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			bf, err := LoadBloomFilter(path)
+			if err != nil {
+				for _, x := range out {
+					x.Close()
+				}
+				return nil, fmt.Errorf("bloom %s: %w", path, err)
+			}
+			out = append(out, bf)
+		}
+		return out, nil
+	}
+
+	adT, err := loadTries(adTriePathsCsv)
+	if err != nil {
+		return err
+	}
+	secT, err := loadTries(secTriePathsCsv)
+	if err != nil {
+		for _, x := range adT {
+			x.t.Close()
+		}
+		return err
+	}
+	adB, err := loadBlooms(adBloomPathsCsv)
+	if err != nil {
+		for _, x := range adT {
+			x.t.Close()
+		}
+		for _, x := range secT {
+			x.t.Close()
+		}
+		return err
+	}
+	secB, err := loadBlooms(secBloomPathsCsv)
+	if err != nil {
+		for _, x := range adT {
+			x.t.Close()
+		}
+		for _, x := range secT {
+			x.t.Close()
+		}
+		for _, x := range adB {
+			x.Close()
+		}
+		return err
+	}
+
+	e.mu.Lock()
+	oldAd, oldSec := e.adTries, e.secTries
+	oldAdB, oldSecB := e.adBlooms, e.secBlooms
+	e.adTries, e.adTrieIDs = nil, nil
+	e.secTries, e.secTrieIDs = nil, nil
+	e.adBlooms, e.secBlooms = nil, nil
+	for _, x := range adT {
+		e.adTries = append(e.adTries, x.t)
+		e.adTrieIDs = append(e.adTrieIDs, x.id)
+	}
+	for _, x := range secT {
+		e.secTries = append(e.secTries, x.t)
+		e.secTrieIDs = append(e.secTrieIDs, x.id)
+	}
+	e.adBlooms = adB
+	e.secBlooms = secB
+	e.mu.Unlock()
+
+	for _, t := range oldAd {
+		if t != nil {
+			t.Close()
+		}
+	}
+	for _, t := range oldSec {
+		if t != nil {
+			t.Close()
+		}
+	}
+	for _, bf := range oldAdB {
+		if bf != nil {
+			bf.Close()
+		}
+	}
+	for _, bf := range oldSecB {
+		if bf != nil {
+			bf.Close()
+		}
+	}
+	return nil
+}
+
+
 func (e *Engine) SetFirewallChecker(checker FirewallChecker) {
 	e.firewallChecker = checker
 }
