@@ -425,6 +425,12 @@ func (e *Engine) ReplaceTriesAtomic(adTriePathsCsv, secTriePathsCsv, adBloomPath
 }
 
 
+// CloseFilters unmaps all trie/bloom files so Windows can delete/rename them.
+// Safe to call when the engine is idle or still serving (lookups become no-ops).
+func (e *Engine) CloseFilters() {
+	_ = e.ReplaceTriesAtomic("", "", "", "")
+}
+
 func (e *Engine) SetFirewallChecker(checker FirewallChecker) {
 	e.firewallChecker = checker
 }

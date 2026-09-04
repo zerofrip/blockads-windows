@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	trieMagic   = 0x54524945
-	trieVersion = 2
-	bloomMagic  = 0x424C4F4D
+	trieMagic    = 0x54524945
+	trieVersion  = 2
+	bloomMagic   = 0x424C4F4D
 	bloomVersion = 1
-	maxDownload = 64 << 20 // 64 MiB
+	maxDownload  = 64 << 20
 )
 
 // CatalogEntry mirrors Android remote filter_lists.json entries.
@@ -36,7 +36,18 @@ type CatalogEntry struct {
 	Scriptlets  string `json:"scriptletsUrl"`
 }
 
+type activeMeta struct {
+	Version string `json:"version"`
+	Trie    string `json:"trie"`
+	Bloom   string `json:"bloom"`
+}
+
 // Manager owns filter download and activation under PROGRAMDATA.
+// Storage uses versioned immutable directories so Windows can keep old mappings
+// open while a new version is prepared:
+//
+//	filters/lists/<id>/v/<version>/{current.trie,current.bloom}
+//	filters/lists/<id>/active.json
 type Manager struct {
 	Dir    string
 	Client *http.Client
@@ -85,16 +96,23 @@ func (m *Manager) FetchCatalog(ctx context.Context, url string) ([]CatalogEntry,
 	return entries, nil
 }
 
+// LoadedPaths are immutable on-disk artifact paths ready for mmap.
 type LoadedPaths struct {
 	AdTrieCSV   string
 	AdBloomCSV  string
 	SecTrieCSV  string
 	SecBloomCSV string
 	ListIDs     []string
+	// PendingActive is written only after a successful engine swap.
+	PendingActive map[string]activeMeta
+	// RetireDirs are previous version directories to delete AFTER the engine
+	// has swapped mappings away from them.
+	RetireDirs []string
 }
 
-// DownloadAndStage downloads enabled lists into staging and validates magic.
-func (m *Manager) DownloadAndStage(ctx context.Context, entries []CatalogEntry, enabledIDs []string) (LoadedPaths, error) {
+// PrepareVersioned downloads, validates (temporary mmap), then promotes into
+// a new immutable version directory BEFORE long-lived mapping.
+func (m *Manager) PrepareVersioned(ctx context.Context, entries []CatalogEntry, enabledIDs []string) (LoadedPaths, error) {
 	want := map[string]bool{}
 	if len(enabledIDs) == 0 {
 		for _, e := range entries {
@@ -108,70 +126,96 @@ func (m *Manager) DownloadAndStage(ctx context.Context, entries []CatalogEntry, 
 		}
 	}
 
-	var paths LoadedPaths
+	paths := LoadedPaths{PendingActive: map[string]activeMeta{}}
+	version := fmt.Sprintf("%d", time.Now().UnixNano())
+
 	for _, e := range entries {
 		if !want[e.ID] {
 			continue
 		}
-		listDir := filepath.Join(m.Dir, "staging", e.ID)
-		_ = os.MkdirAll(listDir, 0o755)
-		triePath := filepath.Join(listDir, "current.trie")
-		bloomPath := filepath.Join(listDir, "current.bloom")
-		if err := m.downloadFile(ctx, e.TrieURL, triePath); err != nil {
+		stageDir := filepath.Join(m.Dir, "staging", e.ID)
+		_ = os.MkdirAll(stageDir, 0o755)
+		stageTrie := filepath.Join(stageDir, "current.trie")
+		stageBloom := filepath.Join(stageDir, "current.bloom")
+		if err := m.downloadFile(ctx, e.TrieURL, stageTrie); err != nil {
+			m.AbortPrepared(paths)
 			return LoadedPaths{}, fmt.Errorf("%s trie: %w", e.ID, err)
 		}
-		if err := m.downloadFile(ctx, e.BloomURL, bloomPath); err != nil {
+		if err := m.downloadFile(ctx, e.BloomURL, stageBloom); err != nil {
+			m.AbortPrepared(paths)
 			return LoadedPaths{}, fmt.Errorf("%s bloom: %w", e.ID, err)
 		}
-		if err := validateTrieFile(triePath); err != nil {
+		if err := validateTrieFile(stageTrie); err != nil {
+			m.AbortPrepared(paths)
 			return LoadedPaths{}, fmt.Errorf("%s trie validate: %w", e.ID, err)
 		}
-		if err := validateBloomFile(bloomPath); err != nil {
+		if err := validateBloomFile(stageBloom); err != nil {
+			m.AbortPrepared(paths)
 			return LoadedPaths{}, fmt.Errorf("%s bloom validate: %w", e.ID, err)
 		}
-		// Prove mmap load
-		tr, err := tunnel.LoadMmapTrie(triePath)
-		if err != nil {
-			return LoadedPaths{}, err
+		// Temporary mmap proof — must Close before rename/promote on Windows.
+		if err := proveMmap(stageTrie, stageBloom); err != nil {
+			m.AbortPrepared(paths)
+			return LoadedPaths{}, fmt.Errorf("%s mmap proof: %w", e.ID, err)
 		}
-		tr.Close()
-		bl, err := tunnel.LoadBloomFilter(bloomPath)
-		if err != nil {
-			return LoadedPaths{}, err
-		}
-		bl.Close()
 
-		cat := "AD"
-		if e.Category == "SECURITY" {
-			cat = "SECURITY"
+		verDir := filepath.Join(m.Dir, "lists", e.ID, "v", version)
+		_ = os.MkdirAll(verDir, 0o755)
+		finalTrie := filepath.Join(verDir, "current.trie")
+		finalBloom := filepath.Join(verDir, "current.bloom")
+		if err := moveFile(stageTrie, finalTrie); err != nil {
+			m.AbortPrepared(paths)
+			return LoadedPaths{}, err
 		}
-		if cat == "SECURITY" {
-			paths.SecTrieCSV = joinCSV(paths.SecTrieCSV, triePath)
-			paths.SecBloomCSV = joinCSV(paths.SecBloomCSV, bloomPath)
+		if err := moveFile(stageBloom, finalBloom); err != nil {
+			m.AbortPrepared(paths)
+			return LoadedPaths{}, err
+		}
+		_ = os.RemoveAll(stageDir)
+
+		prev := m.readActive(e.ID)
+		meta := activeMeta{Version: version, Trie: finalTrie, Bloom: finalBloom}
+		paths.PendingActive[e.ID] = meta
+		if prev != nil && prev.Version != "" && prev.Version != version {
+			paths.RetireDirs = append(paths.RetireDirs, filepath.Join(m.Dir, "lists", e.ID, "v", prev.Version))
+		}
+
+		if e.Category == "SECURITY" {
+			paths.SecTrieCSV = joinCSV(paths.SecTrieCSV, finalTrie)
+			paths.SecBloomCSV = joinCSV(paths.SecBloomCSV, finalBloom)
 		} else {
-			paths.AdTrieCSV = joinCSV(paths.AdTrieCSV, triePath)
-			paths.AdBloomCSV = joinCSV(paths.AdBloomCSV, bloomPath)
+			paths.AdTrieCSV = joinCSV(paths.AdTrieCSV, finalTrie)
+			paths.AdBloomCSV = joinCSV(paths.AdBloomCSV, finalBloom)
 		}
 		paths.ListIDs = append(paths.ListIDs, e.ID)
 	}
 	return paths, nil
 }
 
-// ActivateStaging moves staging → lists/<id> after engine accepted the paths.
-func (m *Manager) ActivateStaging(listIDs []string) error {
-	for _, id := range listIDs {
-		src := filepath.Join(m.Dir, "staging", id)
-		dst := filepath.Join(m.Dir, "lists", id)
-		_ = os.MkdirAll(filepath.Dir(dst), 0o755)
-		_ = os.RemoveAll(dst)
-		if err := os.Rename(src, dst); err != nil {
-			return err
-		}
+// CommitPrepared writes active.json and deletes retired version dirs after a
+// successful in-memory filter swap.
+func (m *Manager) CommitPrepared(paths LoadedPaths) {
+	for id, meta := range paths.PendingActive {
+		_ = m.writeActive(id, meta)
 	}
-	return nil
+	m.RetireVersions(paths.RetireDirs)
 }
 
-// PathsFromCurrent returns CSV paths from activated lists/.
+// AbortPrepared removes newly created version directories when activation fails.
+func (m *Manager) AbortPrepared(paths LoadedPaths) {
+	for _, meta := range paths.PendingActive {
+		_ = os.RemoveAll(filepath.Dir(meta.Trie))
+	}
+}
+
+// RetireVersions deletes previous version directories after they are no longer mapped.
+func (m *Manager) RetireVersions(dirs []string) {
+	for _, d := range dirs {
+		_ = os.RemoveAll(d)
+	}
+}
+
+// PathsFromCurrent returns CSV paths from active.json pointers.
 func (m *Manager) PathsFromCurrent(entries []CatalogEntry, enabledIDs []string) (LoadedPaths, error) {
 	want := map[string]bool{}
 	for _, id := range enabledIDs {
@@ -185,25 +229,116 @@ func (m *Manager) PathsFromCurrent(entries []CatalogEntry, enabledIDs []string) 
 		}
 	}
 	var paths LoadedPaths
+	ids := enabledIDs
+	if len(ids) == 0 {
+		for _, e := range entries {
+			if want[e.ID] {
+				ids = append(ids, e.ID)
+			}
+		}
+		// If no catalog, scan lists/
+		if len(ids) == 0 {
+			listRoot := filepath.Join(m.Dir, "lists")
+			ents, _ := os.ReadDir(listRoot)
+			for _, ent := range ents {
+				if ent.IsDir() {
+					ids = append(ids, ent.Name())
+				}
+			}
+		}
+	}
+	byID := map[string]CatalogEntry{}
 	for _, e := range entries {
-		if !want[e.ID] {
+		byID[e.ID] = e
+	}
+	for _, id := range ids {
+		meta := m.readActive(id)
+		if meta == nil {
 			continue
 		}
-		triePath := filepath.Join(m.Dir, "lists", e.ID, "current.trie")
-		bloomPath := filepath.Join(m.Dir, "lists", e.ID, "current.bloom")
-		if _, err := os.Stat(triePath); err != nil {
-			continue
-		}
-		if e.Category == "SECURITY" {
-			paths.SecTrieCSV = joinCSV(paths.SecTrieCSV, triePath)
-			paths.SecBloomCSV = joinCSV(paths.SecBloomCSV, bloomPath)
+		sec := byID[id].Category == "SECURITY"
+		if sec {
+			paths.SecTrieCSV = joinCSV(paths.SecTrieCSV, meta.Trie)
+			paths.SecBloomCSV = joinCSV(paths.SecBloomCSV, meta.Bloom)
 		} else {
-			paths.AdTrieCSV = joinCSV(paths.AdTrieCSV, triePath)
-			paths.AdBloomCSV = joinCSV(paths.AdBloomCSV, bloomPath)
+			paths.AdTrieCSV = joinCSV(paths.AdTrieCSV, meta.Trie)
+			paths.AdBloomCSV = joinCSV(paths.AdBloomCSV, meta.Bloom)
 		}
-		paths.ListIDs = append(paths.ListIDs, e.ID)
+		paths.ListIDs = append(paths.ListIDs, id)
 	}
 	return paths, nil
+}
+
+func proveMmap(triePath, bloomPath string) error {
+	tr, err := tunnel.LoadMmapTrie(triePath)
+	if err != nil {
+		return err
+	}
+	tr.Close()
+	bl, err := tunnel.LoadBloomFilter(bloomPath)
+	if err != nil {
+		return err
+	}
+	bl.Close()
+	return nil
+}
+
+func (m *Manager) activePath(id string) string {
+	return filepath.Join(m.Dir, "lists", id, "active.json")
+}
+
+func (m *Manager) readActive(id string) *activeMeta {
+	b, err := os.ReadFile(m.activePath(id))
+	if err != nil {
+		return nil
+	}
+	var meta activeMeta
+	if json.Unmarshal(b, &meta) != nil {
+		return nil
+	}
+	return &meta
+}
+
+func (m *Manager) writeActive(id string, meta activeMeta) error {
+	dir := filepath.Join(m.Dir, "lists", id)
+	_ = os.MkdirAll(dir, 0o755)
+	b, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := m.activePath(id) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.activePath(id))
+}
+
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// Cross-device fallback: copy then remove
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 func joinCSV(existing, path string) string {

@@ -277,18 +277,19 @@ func (c *Controller) loadFiltersLocked(ctx context.Context, engine *tunnel.Engin
 		}
 		return engine.ReplaceTriesAtomic(paths.AdTrieCSV, paths.SecTrieCSV, paths.AdBloomCSV, paths.SecBloomCSV)
 	}
-	staged, err := c.filters.DownloadAndStage(ctx, entries, cfg.Filters.EnabledListIDs)
+	prepared, err := c.filters.PrepareVersioned(ctx, entries, cfg.Filters.EnabledListIDs)
 	if err != nil {
 		return err
 	}
-	if staged.AdTrieCSV == "" && staged.SecTrieCSV == "" {
+	if prepared.AdTrieCSV == "" && prepared.SecTrieCSV == "" {
 		return nil
 	}
-	if err := engine.ReplaceTriesAtomic(staged.AdTrieCSV, staged.SecTrieCSV, staged.AdBloomCSV, staged.SecBloomCSV); err != nil {
+	if err := engine.ReplaceTriesAtomic(prepared.AdTrieCSV, prepared.SecTrieCSV, prepared.AdBloomCSV, prepared.SecBloomCSV); err != nil {
+		c.filters.AbortPrepared(prepared)
 		return err
 	}
-	_ = c.filters.ActivateStaging(staged.ListIDs)
-	c.listIDs = staged.ListIDs
+	c.filters.CommitPrepared(prepared)
+	c.listIDs = prepared.ListIDs
 	c.filterAt = time.Now().UTC()
 	c.filterErr = ""
 	return nil
@@ -571,3 +572,4 @@ func healthCheckLocalDNS(ctx context.Context, port int) error {
 	}
 	return nil
 }
+

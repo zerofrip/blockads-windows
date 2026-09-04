@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 )
 
-const MutexName = "Global\\BlockAdsController"
-
 // Lock holds exclusive controller ownership for the process lifetime.
 type Lock struct {
 	release func() error
@@ -36,3 +34,4 @@ func lockFilePath(dataDir string) string {
 func errInUse() error {
 	return fmt.Errorf("another BlockAds controller is already running")
 }
+

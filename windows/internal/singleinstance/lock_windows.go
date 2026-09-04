@@ -2,11 +2,26 @@
 
 package singleinstance
 
-import "golang.org/x/sys/windows"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/sys/windows"
+)
+
+// mutexNameForDataDir scopes the Global mutex so parallel tests with different
+// TempDirs do not collide, while production PROGRAMDATA still gets one machine-
+// wide controller lock per data directory.
+func mutexNameForDataDir(dataDir string) string {
+	clean := strings.ToLower(filepath.Clean(dataDir))
+	sum := sha256.Sum256([]byte(clean))
+	return "Global\\BlockAdsController_" + hex.EncodeToString(sum[:8])
+}
 
 func acquirePlatform(dataDir string) (*Lock, error) {
-	_ = dataDir // Windows uses a machine-global named mutex
-	name, err := windows.UTF16PtrFromString(MutexName)
+	name, err := windows.UTF16PtrFromString(mutexNameForDataDir(dataDir))
 	if err != nil {
 		return nil, err
 	}

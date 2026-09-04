@@ -11,7 +11,7 @@ import (
 	tunnel "github.com/nqmgaming/blockads-tunnel"
 )
 
-func TestDownloadValidateAndAtomicActivate(t *testing.T) {
+func TestPrepareVersionedAndAtomicActivate(t *testing.T) {
 	dir := t.TempDir()
 	triePath := filepath.Join(dir, "src.trie")
 	bloomPath := filepath.Join(dir, "src.bloom")
@@ -39,23 +39,46 @@ func TestDownloadValidateAndAtomicActivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staged, err := m.DownloadAndStage(ctx, entries, nil)
+	prepared, err := m.PrepareVersioned(ctx, entries, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := tunnel.NewEngine()
-	if err := e.ReplaceTriesAtomic(staged.AdTrieCSV, staged.SecTrieCSV, staged.AdBloomCSV, staged.SecBloomCSV); err != nil {
+	defer e.CloseFilters()
+	if err := e.ReplaceTriesAtomic(prepared.AdTrieCSV, prepared.SecTrieCSV, prepared.AdBloomCSV, prepared.SecBloomCSV); err != nil {
 		t.Fatal(err)
 	}
+	m.CommitPrepared(prepared)
 	if !e.IsDomainBlocked("ads.test") {
 		t.Fatal("expected blocked")
 	}
 	bad := filepath.Join(dir, "bad.trie")
 	_ = os.WriteFile(bad, []byte("nope"), 0o644)
-	if err := e.ReplaceTriesAtomic(bad, "", staged.AdBloomCSV, ""); err == nil {
+	if err := e.ReplaceTriesAtomic(bad, "", prepared.AdBloomCSV, ""); err == nil {
 		t.Fatal("expected failure")
 	}
 	if !e.IsDomainBlocked("ads.test") {
 		t.Fatal("old filter must remain")
+	}
+
+	// Second prepare creates a new version while old mapping stays valid until swap.
+	prepared2, err := m.PrepareVersioned(ctx, entries, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared2.AdTrieCSV == prepared.AdTrieCSV {
+		t.Fatal("expected distinct versioned paths")
+	}
+	if err := e.ReplaceTriesAtomic(prepared2.AdTrieCSV, prepared2.SecTrieCSV, prepared2.AdBloomCSV, prepared2.SecBloomCSV); err != nil {
+		t.Fatal(err)
+	}
+	m.CommitPrepared(prepared2)
+	// After close, retiring old version dirs must succeed on Windows.
+	e.CloseFilters()
+	m.RetireVersions(prepared2.RetireDirs)
+	for _, d := range prepared2.RetireDirs {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Fatalf("retired dir still present: %s (%v)", d, err)
+		}
 	}
 }
